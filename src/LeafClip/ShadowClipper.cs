@@ -5,53 +5,138 @@ using UnityEngine.Rendering;
 
 namespace LeafClip
 {
-    // One face of a convex wall contributes a convex perspective shadow. The union
-    // of shadows from faces visible to the trunk equals the shadow of the whole box.
+    internal sealed class FoliageSelection
+    {
+        internal readonly int Slot;
+        // Null selects the entire submesh; otherwise one bit per source triangle.
+        internal readonly bool[] Triangles;
+        internal FoliageSelection(int slot, bool[] triangles) { Slot = slot; Triangles = triangles; }
+    }
+
+    // Cast each wall footprint edge horizontally from the trunk axis. Fir foliage
+    // grows outward at branch height, so a ray from the ground-level root misses
+    // foliage behind upper walls. The wall's real vertical span caps each shadow.
     internal sealed class ShadowVolume
     {
         internal readonly Plane[] Planes;
         private ShadowVolume(Plane[] planes) { Planes = planes; }
 
+        // An AABB entirely outside any clipping plane cannot contain foliage
+        // affected by this face. This only rejects definite misses.
+        internal bool Intersects(Bounds bounds)
+        {
+            Vector3 center = bounds.center, extents = bounds.extents;
+            foreach (Plane plane in Planes)
+            {
+                Vector3 normal = plane.normal;
+                float reach = Mathf.Abs(normal.x) * extents.x + Mathf.Abs(normal.y) * extents.y + Mathf.Abs(normal.z) * extents.z;
+                if (plane.GetDistanceToPoint(center) + reach < -0.0001f) return false;
+            }
+            return true;
+        }
+
+        // A triangle is convex: when all three vertices lie outside one plane,
+        // neither it nor any fragment of it can meet this shadow volume.
+        internal bool MayIntersectTriangle(Vector3 a, Vector3 b, Vector3 c)
+        {
+            // Height caps reject most unrelated pieces in tall, dense bases.
+            for (int i = Planes.Length - 2; i < Planes.Length; i++)
+            {
+                Plane plane = Planes[i];
+                if (plane.GetDistanceToPoint(a) < -0.0001f &&
+                    plane.GetDistanceToPoint(b) < -0.0001f &&
+                    plane.GetDistanceToPoint(c) < -0.0001f) return false;
+            }
+            for (int i = 0; i < Planes.Length - 2; i++)
+            {
+                Plane plane = Planes[i];
+                if (plane.GetDistanceToPoint(a) < -0.0001f &&
+                    plane.GetDistanceToPoint(b) < -0.0001f &&
+                    plane.GetDistanceToPoint(c) < -0.0001f) return false;
+            }
+            return true;
+        }
+
         internal static IEnumerable<ShadowVolume> FromBox(BoxCollider box, Vector3 origin, float clearance)
         {
             Vector3 scale = box.transform.lossyScale;
             if (Mathf.Abs(scale.x) < 0.001f || Mathf.Abs(scale.y) < 0.001f || Mathf.Abs(scale.z) < 0.001f) yield break;
-            Vector3 half = box.size * 0.5f + new Vector3(clearance / Mathf.Abs(scale.x), clearance / Mathf.Abs(scale.y), clearance / Mathf.Abs(scale.z));
+            Vector3 half = box.size * 0.5f;
             Vector3[] corners = new Vector3[8];
             for (int i = 0; i < 8; i++)
                 corners[i] = box.transform.TransformPoint(box.center + new Vector3((i & 1) != 0 ? half.x : -half.x, (i & 2) != 0 ? half.y : -half.y, (i & 4) != 0 ? half.z : -half.z));
-            Vector3 center = box.transform.TransformPoint(box.center);
-            // A face is specified in winding order, though normals are reoriented below.
-            int[,] faces = { { 0, 2, 6, 4 }, { 1, 5, 7, 3 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 1, 3, 2 }, { 4, 6, 7, 5 } };
-            for (int f = 0; f < 6; f++)
+            float bottom = corners[0].y, top = corners[0].y;
+            var projected = new List<Vector2>(8);
+            foreach (Vector3 corner in corners)
             {
-                Vector3[] face = new Vector3[4];
-                Vector3 faceCenter = Vector3.zero;
-                for (int j = 0; j < 4; j++) { face[j] = corners[faces[f, j]]; faceCenter += face[j] * 0.25f; }
-                Vector3 outward = Vector3.Cross(face[1] - face[0], face[2] - face[1]).normalized;
-                if (Vector3.Dot(outward, faceCenter - center) < 0f) outward = -outward;
-                // Origin inside/at the expanded box has no useful trunk-facing half-space.
-                if (Vector3.Dot(outward, origin - faceCenter) <= 0.001f) continue;
-                Plane[] planes = new Plane[5];
-                planes[0] = new Plane(-outward, faceCenter);
-                bool valid = true;
-                for (int j = 0; j < 4; j++)
-                {
-                    Vector3 sideNormal = Vector3.Cross(face[j] - origin, face[(j + 1) % 4] - origin);
-                    if (sideNormal.sqrMagnitude < 1e-8f) { valid = false; break; }
-                    sideNormal.Normalize();
-                    if (Vector3.Dot(sideNormal, faceCenter - origin) < 0f) sideNormal = -sideNormal;
-                    planes[j + 1] = new Plane(sideNormal, origin);
-                }
-                if (valid) yield return new ShadowVolume(planes);
+                projected.Add(new Vector2(corner.x, corner.z));
+                bottom = Mathf.Min(bottom, corner.y);
+                top = Mathf.Max(top, corner.y);
             }
+            List<Vector2> hull = ConvexHull(projected);
+            if (hull.Count < 3) yield break;
+            Vector2 trunk = new Vector2(origin.x, origin.z);
+            for (int i = 0; i < hull.Count; i++)
+            {
+                Vector2 a = hull[i], b = hull[(i + 1) % hull.Count];
+                Vector2 edge = b - a;
+                Vector2 outward = new Vector2(edge.y, -edge.x).normalized;
+                Vector2 middle = (a + b) * 0.5f;
+                if (Vector2.Dot(outward, trunk - middle) <= 0.001f) continue;
+                if ((a - trunk).sqrMagnitude < 1e-8f || (b - trunk).sqrMagnitude < 1e-8f) continue;
+                Vector2 inward = -outward;
+                Vector2 sideA = SideNormal(trunk, a, middle), sideB = SideNormal(trunk, b, middle);
+                Plane[] planes = new Plane[5];
+                Vector2 entry = a + outward * clearance;
+                planes[0] = new Plane(new Vector3(inward.x, 0f, inward.y), new Vector3(entry.x, 0f, entry.y));
+                planes[1] = new Plane(new Vector3(sideA.x, 0f, sideA.y), origin);
+                planes[2] = new Plane(new Vector3(sideB.x, 0f, sideB.y), origin);
+                planes[3] = new Plane(Vector3.up, new Vector3(0f, bottom, 0f));
+                planes[4] = new Plane(Vector3.down, new Vector3(0f, top, 0f));
+                yield return new ShadowVolume(planes);
+            }
+        }
+
+        private static Vector2 SideNormal(Vector2 origin, Vector2 endpoint, Vector2 inside)
+        {
+            Vector2 ray = endpoint - origin;
+            Vector2 normal = new Vector2(-ray.y, ray.x).normalized;
+            return Vector2.Dot(normal, inside - origin) >= 0f ? normal : -normal;
+        }
+
+        private static float Cross(Vector2 a, Vector2 b) { return a.x * b.y - a.y * b.x; }
+
+        private static List<Vector2> ConvexHull(List<Vector2> points)
+        {
+            points.Sort((a, b) => a.x == b.x ? a.y.CompareTo(b.y) : a.x.CompareTo(b.x));
+            var unique = new List<Vector2>(points.Count);
+            foreach (Vector2 point in points)
+                if (unique.Count == 0 || (point - unique[unique.Count - 1]).sqrMagnitude > 1e-10f) unique.Add(point);
+            if (unique.Count < 3) return unique;
+            var hull = new List<Vector2>(unique.Count * 2);
+            foreach (Vector2 point in unique)
+            {
+                while (hull.Count >= 2 && Cross(hull[hull.Count - 1] - hull[hull.Count - 2], point - hull[hull.Count - 1]) <= 1e-8f)
+                    hull.RemoveAt(hull.Count - 1);
+                hull.Add(point);
+            }
+            int lowerCount = hull.Count;
+            for (int i = unique.Count - 2; i >= 0; i--)
+            {
+                Vector2 point = unique[i];
+                while (hull.Count > lowerCount && Cross(hull[hull.Count - 1] - hull[hull.Count - 2], point - hull[hull.Count - 1]) <= 1e-8f)
+                    hull.RemoveAt(hull.Count - 1);
+                hull.Add(point);
+            }
+            hull.RemoveAt(hull.Count - 1);
+            return hull;
         }
     }
 
     internal sealed class ShadowClipper
     {
         private readonly Mesh source;
-        private readonly List<Vector3> positions, normals;
+        private readonly List<Vector3> positions, worldPositions, normals;
         private readonly List<Vector4> tangents;
         private readonly List<Vector4>[] uvs = new List<Vector4>[8];
         private readonly int[] uvDimensions = new int[8];
@@ -67,6 +152,8 @@ namespace LeafClip
             this.meshTransform = meshTransform;
             this.volumes = volumes;
             positions = new List<Vector3>(source.vertices);
+            worldPositions = new List<Vector3>(positions.Count);
+            foreach (Vector3 position in positions) worldPositions.Add(meshTransform.TransformPoint(position));
             normals = source.HasVertexAttribute(VertexAttribute.Normal) ? new List<Vector3>(source.normals) : null;
             tangents = source.HasVertexAttribute(VertexAttribute.Tangent) ? new List<Vector4>(source.tangents) : null;
             colors = source.HasVertexAttribute(VertexAttribute.Color) ? new List<Color>(source.colors) : null;
@@ -100,18 +187,28 @@ namespace LeafClip
             return true;
         }
 
-        internal static Mesh Clip(Mesh source, Transform meshTransform, IList<int> foliageSlots, List<ShadowVolume> volumes)
+        internal static Mesh Clip(Mesh source, Transform meshTransform, IList<FoliageSelection> foliageSlots, List<ShadowVolume> volumes)
         {
             var clipper = new ShadowClipper(source, meshTransform, volumes);
-            foreach (int slot in foliageSlots)
+            foreach (FoliageSelection selection in foliageSlots)
             {
+                int slot = selection.Slot;
                 List<int> input = clipper.indices[slot];
+                if (selection.Triangles != null && selection.Triangles.Length != input.Count / 3)
+                    throw new InvalidOperationException("Foliage triangle selection no longer matches the source mesh.");
                 var output = new List<int>(input.Count);
                 for (int i = 0; i < input.Count; i += 3)
                 {
+                    if (selection.Triangles != null && !selection.Triangles[i / 3])
+                    {
+                        output.Add(input[i]); output.Add(input[i + 1]); output.Add(input[i + 2]);
+                        continue;
+                    }
                     var fragments = new List<List<int>> { new List<int> { input[i], input[i + 1], input[i + 2] } };
+                    Vector3 originalA = clipper.worldPositions[input[i]], originalB = clipper.worldPositions[input[i + 1]], originalC = clipper.worldPositions[input[i + 2]];
                     foreach (ShadowVolume volume in volumes)
                     {
+                        if (!volume.MayIntersectTriangle(originalA, originalB, originalC)) continue;
                         var next = new List<List<int>>();
                         foreach (List<int> fragment in fragments) clipper.Subtract(fragment, volume, next);
                         fragments = next;
@@ -165,6 +262,19 @@ namespace LeafClip
 
         private void Subtract(List<int> polygon, ShadowVolume volume, List<List<int>> keep)
         {
+            bool whollyInside = true;
+            foreach (Plane plane in volume.Planes)
+            {
+                bool anyInside = false;
+                foreach (int vertex in polygon)
+                {
+                    bool vertexInside = plane.GetDistanceToPoint(worldPositions[vertex]) >= -1e-4f;
+                    anyInside |= vertexInside;
+                    whollyInside &= vertexInside;
+                }
+                if (!anyInside) { keep.Add(polygon); return; }
+            }
+            if (whollyInside) return;
             List<int> inside = polygon;
             foreach (Plane plane in volume.Planes)
             {
@@ -182,8 +292,8 @@ namespace LeafClip
             for (int i = 0; i < polygon.Count; i++)
             {
                 int a = polygon[i], b = polygon[(i + 1) % polygon.Count];
-                float da = plane.GetDistanceToPoint(meshTransform.TransformPoint(positions[a]));
-                float db = plane.GetDistanceToPoint(meshTransform.TransformPoint(positions[b]));
+                float da = plane.GetDistanceToPoint(worldPositions[a]);
+                float db = plane.GetDistanceToPoint(worldPositions[b]);
                 if (da >= -1e-4f) positive.Add(a);
                 if (da < -1e-4f) negative.Add(a);
                 if ((da < -1e-4f && db >= -1e-4f) || (da >= -1e-4f && db < -1e-4f))
@@ -207,6 +317,7 @@ namespace LeafClip
         {
             int index = positions.Count;
             positions.Add(Vector3.LerpUnclamped(positions[a], positions[b], t));
+            worldPositions.Add(Vector3.LerpUnclamped(worldPositions[a], worldPositions[b], t));
             if (normals != null) normals.Add(Vector3.LerpUnclamped(normals[a], normals[b], t).normalized);
             if (tangents != null)
             {

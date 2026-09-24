@@ -1,6 +1,6 @@
 # Runtime validation checklist
 
-All runtime cases below are **pending**. Build-only validation passed; these require the actual game. Do not use a successful .NET build as evidence that a Unity-native mesh call works.
+The earlier prototype has been exercised in Valheim, including pine/fir topology selection and fir clipping. The revised branch-height shadow geometry and beam response are **pending in-game validation**. A successful .NET build does not establish that the visuals work.
 
 ## Diagnostic phase
 
@@ -15,17 +15,21 @@ All runtime cases below are **pending**. Build-only validation passed; these req
 
 ## Clipping phase acceptance (future)
 
-The first guarded clipping prototype is now implemented but remains untested in Valheim. Enable `Prototype.Enabled` only for a focused test with a separate leaf material and one player-built box wall. Record a `Clipped ...` line, inspect the near and far LODs, then remove the wall and disable the prototype to verify restoration. Mixed-material pine/fir and particle leaves are known gaps, not passing cases.
+Enable `Prototype.Enabled` for a focused test with one player-built box wall and a pine or fir. Record a `Clipped ... topology=...` line, inspect the near and far LODs, then remove the wall and disable the prototype to verify restoration. Repeat with a beech or birch for the separate-material path. Particle leaves remain outside the prototype.
 
 - With many loaded trees, confirm only trees within `MaxTreeDistance` are processed; walk across the boundary, wait five seconds, and verify meshes are generated on entry and restored on exit. Test a wall added near a previously unclipped tree, since piece notifications must queue it too.
 
-- Automated geometry tests: full keep/remove, partial triangle split, edge/vertex on boundary, near-parallel rays, origin-in-box, rotated box, nonuniform transforms, multiple obstacle union, winding, nondegenerate output, and interpolated streams. Compare retained points with trunk-to-point segment/box intersection.
+- Automated geometry tests: full keep/remove, partial triangle split, edge/vertex on boundary, near-parallel rays, origin-in-footprint, rotated box, nonuniform transforms, multiple obstacle union, winding, nondegenerate output, and interpolated streams. Compare retained points with a horizontal trunk-to-point segment crossing the obstruction footprint **and** the wall's vertical span.
 - Planted tree with adjacent wall: only obstructed portions disappear; trunk remains. Leaves behind a wall stay removed even where they extend outdoors again.
+- Short wall below a high leaf: foliage above the wall must remain intact, even when the trunk-to-leaf segment passes through the wall. Foliage inside and farther behind the wall at its height should disappear. The clearance moves only the trunk-facing entry plane and must not raise the top/side silhouette.
+- Pine and fir: check `topology` in the clipping log, inspect needles and detached branches at every LOD, and verify that the connected main trunk stays intact. Repeat on naturally generated and planted trees where available; report an unsupported layout as a skip rather than assuming every tree asset is identical.
+- Fir beside a large base: first try a normal wood wall, then a core-wood beam or pole. Confirm a `Clipped FirTree... topology=1` entry and inspect the new `wall=`, `beam=`, and `pole=` counts. Check foliage both at the structure and farther behind it within the structure's height. If a skip remains, record its box, face, and triangle-face counts. Watch for placement stutter, especially with hundreds of nearby pieces.
 - Naturally generated tree with adjacent wall: same result. Repeat across distinct tree layouts, including multiple biomes; no tree-name or origin configuration is required.
 - Thin partial intersection splits triangles, without hiding a renderer, cluster, or whole submesh.
 - Roof/angled pieces and multiple walls: either explicitly supported and correct or rejected without corrupting the mesh.
 - Place/remove structure after load; remote placement/removal; tree growth/replacement; save/reload; leave/rejoin.
 - All LOD distances and crossfades: consistent boundary, no uncut billboard popping, original material/shader/lighting/alpha maintained.
-- Wind and trunk shake at the boundary: evaluate clearance at 0.25, 0.5 and 0.75 m; document remaining penetration.
+- Wind and trunk shake at the boundary: evaluate clearance at 0.0, 0.05 and 0.25 m; document both remaining penetration and any visible gap. Existing config files must be changed manually to test the new 0.05 m default.
+- Toggle `ClipWoodBehindWalls` beside a birch: compare branch intersections and inspect the main trunk at both LODs. Report any trunk segments removed unexpectedly.
 - Destruction/unload, disable/re-enable and another mod replacing a mesh: restore only owned references; no mesh leaks.
 - Many trees near a large base: measure frame time, rebuild queue latency, allocations, cache memory and instancing impact. No per-frame mesh rebuilding when nothing changes.
