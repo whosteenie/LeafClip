@@ -7,7 +7,7 @@ Run: python tests/shadow_reference.py
 import numpy as np
 
 
-def face_shadows(origin, center, half, rotation, clearance=0.0):
+def face_shadows(origin, center, half, rotation, clearance=0.0, wind_guard=0.0):
     corners = np.array([center + rotation @ (half * np.array([
         1 if i & 1 else -1, 1 if i & 2 else -1, 1 if i & 4 else -1
     ])) for i in range(8)])
@@ -22,14 +22,15 @@ def face_shadows(origin, center, half, rotation, clearance=0.0):
         middle = (a + b) / 2
         if outward @ (trunk - middle) <= 0.001:
             continue
-        entry = a + outward * clearance
+        entry = a + outward * (clearance + wind_guard)
         planes = [(np.array([-outward[0], 0.0, -outward[1]]), np.array([entry[0], 0.0, entry[1]]))]
         for endpoint in (a, b):
             ray = endpoint - trunk
             side = np.array([-ray[1], ray[0]]) / np.linalg.norm(ray)
             if side @ (middle - trunk) < 0:
                 side = -side
-            planes.append((np.array([side[0], 0.0, side[1]]), origin))
+            side3 = np.array([side[0], 0.0, side[1]])
+            planes.append((side3, origin - side3 * wind_guard))
         planes.extend(((np.array([0.0, 1.0, 0.0]), np.array([0.0, corners[:, 1].min(), 0.0])),
                        (np.array([0.0, -1.0, 0.0]), np.array([0.0, corners[:, 1].max(), 0.0]))))
         shadows.append(planes)
@@ -67,6 +68,7 @@ def main():
         half = rng.uniform(0.3, 2.0, 3)
         origin = center + rotation @ np.array([half[0] + rng.uniform(1, 5), 0.3, 0.2])
         shadows = face_shadows(origin, center, half, rotation)
+        guarded = face_shadows(origin, center, half, rotation, wind_guard=0.12)
         for _ in range(1000):
             point = center + rng.uniform(-12, 12, 3)
             in_shadow = any(all(normal @ (point - anchor) >= -1e-6 for normal, anchor in volume)
@@ -79,6 +81,8 @@ def main():
             if in_shadow != intersects:
                 raise AssertionError((origin, center, half, point, in_shadow, intersects))
             if in_shadow:
+                assert any(all(normal @ (point - anchor) >= -1e-6 for normal, anchor in volume)
+                           for volume in guarded)
                 offset = rng.uniform(-1.0, 1.0, 3)
                 bounds_center = point + offset
                 bounds_extents = np.abs(offset) + 0.1
@@ -110,6 +114,10 @@ def main():
     elevated_leaf = np.array([-6.0, 10.0, 0.0])
     assert any(all(normal @ (elevated_leaf - anchor) >= -1e-6 for normal, anchor in volume)
                for volume in face_shadows(origin, elevated_center, half, rotation, 0.05))
+    # Wind allowance expands only horizontal planes; it cannot consume a leaf
+    # above the obstruction's actual top.
+    assert not any(all(normal @ (above_wall - anchor) >= -1e-6 for normal, anchor in volume)
+                   for volume in face_shadows(origin, center, half, rotation, 0.05, 0.5))
     print(f"Verified {cases} random horizontal-footprint cases")
 
 

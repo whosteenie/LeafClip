@@ -1,6 +1,6 @@
 # Runtime validation checklist
 
-The earlier prototype has been exercised in Valheim, including pine/fir topology selection and fir clipping. The revised branch-height shadow geometry and beam response are **pending in-game validation**. A successful .NET build does not establish that the visuals work.
+The earlier prototype has been exercised in Valheim, including pine/fir topology selection and fir clipping. The roof and wind allowance changes are **pending in-game validation**. A successful .NET build does not establish that the visuals work.
 
 ## Diagnostic phase
 
@@ -26,10 +26,10 @@ Enable `Prototype.Enabled` for a focused test with one player-built box wall and
 - Fir beside a large base: first try a normal wood wall, then a core-wood beam or pole. Confirm a `Clipped FirTree... topology=1` entry and inspect the new `wall=`, `beam=`, and `pole=` counts. Check foliage both at the structure and farther behind it within the structure's height. If a skip remains, record its box, face, and triangle-face counts. Watch for placement stutter, especially with hundreds of nearby pieces.
 - Naturally generated tree with adjacent wall: same result. Repeat across distinct tree layouts, including multiple biomes; no tree-name or origin configuration is required.
 - Thin partial intersection splits triangles, without hiding a renderer, cluster, or whole submesh.
-- Roof/angled pieces and multiple walls: either explicitly supported and correct or rejected without corrupting the mesh.
+- Wood and darkwood sloped roof pieces: confirm the `roof=` collider count, clip through and behind the roof surface, and inspect along the slope for overcut. Compare a flat roof and a corner piece. Roofs with mesh colliders should remain unchanged for now. Test multiple walls plus roofs near the clipping work budget; if `roofDeferred=True`, wall/beam clipping should still remain active.
 - Place/remove structure after load; remote placement/removal; tree growth/replacement; save/reload; leave/rejoin.
 - All LOD distances and crossfades: consistent boundary, no uncut billboard popping, original material/shader/lighting/alpha maintained.
-- Wind and trunk shake at the boundary: evaluate clearance at 0.0, 0.05 and 0.25 m; document both remaining penetration and any visible gap. Existing config files must be changed manually to test the new 0.05 m default.
+- Wind and trunk shake at the boundary: keep `Clearance = 0.05` and compare `WindGuard = 0`, `0.12`, and `0.25` m during calm and strong wind. Record penetration, visible gap, frame time, and whether changing the config queues one rebuild rather than recurring rebuilds. Above-wall foliage must remain visible. The static guard is an approximation of shader movement.
 - Toggle `ClipWoodBehindWalls` beside a birch: compare branch intersections and inspect the main trunk at both LODs. Report any trunk segments removed unexpectedly.
 - Destruction/unload, disable/re-enable and another mod replacing a mesh: restore only owned references; no mesh leaks.
 - Many trees near a large base: measure frame time, rebuild queue latency, allocations, cache memory and instancing impact. No per-frame mesh rebuilding when nothing changes.

@@ -11,8 +11,8 @@ namespace LeafClip
     internal sealed class ClipPrototype
     {
         private readonly Plugin plugin;
-        private readonly ConfigEntry<bool> enabled, clipWood, includeBeams;
-        private readonly ConfigEntry<float> radius, clearance, treeDistance;
+        private readonly ConfigEntry<bool> enabled, clipWood, includeBeams, includeRoofs;
+        private readonly ConfigEntry<float> radius, clearance, windGuard, treeDistance;
         private readonly ConfigEntry<string> wallName;
         private readonly ConfigEntry<int> budget;
         private readonly Queue<TreeBase> dirty = new Queue<TreeBase>();
@@ -22,7 +22,8 @@ namespace LeafClip
         private readonly HashSet<int> nearTrees = new HashSet<int>();
         private readonly Dictionary<Mesh, bool[]> topologyMasks = new Dictionary<Mesh, bool[]>();
         private readonly Harmony harmony;
-        private bool wasEnabled, wasClippingWood, wasIncludingBeams;
+        private bool wasEnabled, wasClippingWood, wasIncludingBeams, wasIncludingRoofs;
+        private float wasClearance, wasWindGuard;
         private float nextHeartbeat, nextDistanceCheck;
         internal static ClipPrototype Current;
 
@@ -32,9 +33,11 @@ namespace LeafClip
             enabled = plugin.Config.Bind("Prototype", "Enabled", false, "Experimental local foliage clipping for readable meshes with leaf material slots or a recognizable detached canopy. Restart after enabling if trees do not update.");
             clipWood = plugin.Config.Bind("Prototype", "ClipWoodBehindWalls", false, "Experimental: also clip bark/trunk material triangles behind walls. This can cut trunk geometry as well as branches.");
             includeBeams = plugin.Config.Bind("Prototype", "IncludeBeamsAndPoles", true, "Also use player-built beam and pole box colliders as foliage obstructions, including core wood pieces.");
+            includeRoofs = plugin.Config.Bind("Prototype", "IncludeRoofs", true, "Also clip against player-built roof box colliders. Angled roofs use up to four height slices.");
             radius = plugin.Config.Bind("Prototype", "SearchRadius", 18f, new ConfigDescription("Search radius around a tree root in metres.", new AcceptableValueRange<float>(2f, 80f)));
             treeDistance = plugin.Config.Bind("Prototype", "MaxTreeDistance", 64f, new ConfigDescription("Only process trees this close to the local player. Rechecked every five seconds.", new AcceptableValueRange<float>(20f, 300f)));
             clearance = plugin.Config.Bind("Prototype", "Clearance", 0.05f, new ConfigDescription("Clip this far before the trunk-facing wall surface without expanding its top or sides. Use a small value to avoid a visible gap.", new AcceptableValueRange<float>(0f, 2f)));
+            windGuard = plugin.Config.Bind("Prototype", "WindGuard", 0.12f, new ConfigDescription("Static horizontal allowance in metres for shader wind near obstructions; zero adds no allowance and incurs no per-frame mesh work.", new AcceptableValueRange<float>(0f, 1f)));
             wallName = plugin.Config.Bind("Prototype", "WallNameContains", "wall", "Only player-built Piece names containing this text count as obstructions in the first prototype.");
             budget = plugin.Config.Bind("Prototype", "TreesPerFrame", 1, new ConfigDescription("Maximum dirty trees processed per frame. Diagnostic prototype; no hard millisecond budget.", new AcceptableValueRange<int>(1, 4)));
             Current = this;
@@ -43,6 +46,9 @@ namespace LeafClip
             wasEnabled = enabled.Value;
             wasClippingWood = clipWood.Value;
             wasIncludingBeams = includeBeams.Value;
+            wasIncludingRoofs = includeRoofs.Value;
+            wasClearance = clearance.Value;
+            wasWindGuard = windGuard.Value;
             if (wasEnabled) EnqueueAll();
         }
 
@@ -64,9 +70,13 @@ namespace LeafClip
                 wasClippingWood = clipWood.Value;
                 foreach (TreeBase tree in knownTrees) Enqueue(tree);
             }
-            if (includeBeams.Value != wasIncludingBeams)
+            if (includeBeams.Value != wasIncludingBeams || includeRoofs.Value != wasIncludingRoofs ||
+                clearance.Value != wasClearance || windGuard.Value != wasWindGuard)
             {
                 wasIncludingBeams = includeBeams.Value;
+                wasIncludingRoofs = includeRoofs.Value;
+                wasClearance = clearance.Value;
+                wasWindGuard = windGuard.Value;
                 foreach (TreeBase tree in knownTrees) Enqueue(tree);
             }
             if (Time.realtimeSinceStartup >= nextDistanceCheck)
@@ -172,7 +182,7 @@ namespace LeafClip
             {
                 if (!tree || !nearTrees.Contains(tree.GetInstanceID())) continue;
                 foreach (BoxCollider box in boxes)
-                    if (box.bounds.SqrDistance(tree.transform.position) <= radiusSquared)
+                    if (HorizontalSqrDistance(box.bounds, tree.transform.position) <= radiusSquared)
                     {
                         Enqueue(tree);
                         break;
@@ -191,20 +201,22 @@ namespace LeafClip
             if (pieceLayer < 0) return;
             int layerMask = 1 << pieceLayer;
             if (nonsolidLayer >= 0) layerMask |= 1 << nonsolidLayer;
-            Collider[] hits = Physics.OverlapSphere(tree.transform.position, radius.Value, layerMask, QueryTriggerInteraction.Ignore);
+            Collider[] hits = Physics.OverlapBox(clipBounds.center, clipBounds.extents, Quaternion.identity, layerMask, QueryTriggerInteraction.Ignore);
             var boxes = new List<BoxCollider>();
             foreach (Collider hit in hits)
             {
                 BoxCollider box = hit as BoxCollider;
-                if (!box || !box.enabled || !box.bounds.Intersects(clipBounds)) continue;
+                if (!box || !box.enabled || !box.bounds.Intersects(clipBounds) ||
+                    HorizontalSqrDistance(box.bounds, tree.transform.position) > radius.Value * radius.Value) continue;
                 Piece piece = box.GetComponentInParent<Piece>();
                 if (IsObstructionPiece(piece)) boxes.Add(box);
             }
-            int wallBoxes = 0, beamBoxes = 0, poleBoxes = 0;
+            int wallBoxes = 0, beamBoxes = 0, poleBoxes = 0, roofBoxes = 0;
             foreach (BoxCollider box in boxes)
             {
                 string name = box.GetComponentInParent<Piece>().name;
-                if (name.IndexOf("beam", StringComparison.OrdinalIgnoreCase) >= 0) beamBoxes++;
+                if (IsRoofName(name)) roofBoxes++;
+                else if (name.IndexOf("beam", StringComparison.OrdinalIgnoreCase) >= 0) beamBoxes++;
                 else if (name.IndexOf("pole", StringComparison.OrdinalIgnoreCase) >= 0) poleBoxes++;
                 else wallBoxes++;
             }
@@ -212,10 +224,14 @@ namespace LeafClip
             if (state && state.HasGenerated && state.Signature == signature && !state.HasChangedSource()) return;
             if (state) state.Restore();
             var volumes = new List<ShadowVolume>();
+            var roofVolumes = new List<ShadowVolume>();
             foreach (BoxCollider box in boxes)
-                foreach (ShadowVolume volume in ShadowVolume.FromBox(box, tree.transform.position, clearance.Value))
-                    if (volume.Intersects(clipBounds)) volumes.Add(volume);
-            if (volumes.Count == 0) return;
+            {
+                bool roof = IsRoofName(box.GetComponentInParent<Piece>().name);
+                foreach (ShadowVolume volume in ShadowVolume.FromBox(box, tree.transform.position, clearance.Value, windGuard.Value, roof))
+                    if (volume.Intersects(clipBounds)) (roof ? roofVolumes : volumes).Add(volume);
+            }
+            if (volumes.Count == 0 && roofVolumes.Count == 0) return;
             long estimatedWork = 0, selectedTriangles = 0;
             foreach (MeshRenderer renderer in tree.GetComponentsInChildren<MeshRenderer>(true))
             {
@@ -227,16 +243,21 @@ namespace LeafClip
                 foreach (FoliageSelection selection in SelectFoliage(renderer, source))
                     selectedTriangles += selection.Triangles == null ? (long)source.GetIndexCount(selection.Slot) / 3L : CountSelected(selection.Triangles);
             }
-            estimatedWork = selectedTriangles * volumes.Count;
             // Small single-material canopies can afford many nearby pieces once
             // individual triangle/volume misses are rejected before splitting.
             long workLimit = selectedTriangles <= 700 ? 900000 : 120000;
             int volumeLimit = selectedTriangles <= 700 ? 1800 : 160;
+            bool roofsDeferred = roofVolumes.Count > 0 && volumes.Count > 0 &&
+                                 (volumes.Count + roofVolumes.Count > volumeLimit ||
+                                  selectedTriangles * (volumes.Count + roofVolumes.Count) > workLimit);
+            if (!roofsDeferred) volumes.AddRange(roofVolumes);
+            estimatedWork = selectedTriangles * volumes.Count;
             if (volumes.Count > volumeLimit || estimatedWork > workLimit)
             {
-                plugin.LogClip($"Skipped {tree.name}: clipping work budget ({boxes.Count} boxes [wall={wallBoxes}, beam={beamBoxes}, pole={poleBoxes}], {volumes.Count} faces, {estimatedWork}/{workLimit} triangle-face checks).");
+                plugin.LogClip($"Skipped {tree.name}: clipping work budget ({boxes.Count} boxes [wall={wallBoxes}, beam={beamBoxes}, pole={poleBoxes}, roof={roofBoxes}], {volumes.Count} faces, {estimatedWork}/{workLimit} triangle-face checks).");
                 return;
             }
+            if (roofsDeferred) plugin.LogClip($"Deferred {roofVolumes.Count} roof face volume(s) for {tree.name}: wall/beam clipping retained within work budget.");
             int generatedCount = 0, topologyCount = 0;
             foreach (MeshRenderer renderer in tree.GetComponentsInChildren<MeshRenderer>(true))
             {
@@ -259,7 +280,7 @@ namespace LeafClip
             if (generatedCount > 0)
             {
                 state.Signature = signature;
-                plugin.LogClip($"Clipped {tree.name}: {generatedCount} mesh LOD(s), topology={topologyCount}, {boxes.Count} obstruction box(es) [wall={wallBoxes}, beam={beamBoxes}, pole={poleBoxes}], {volumes.Count} face volume(s), wood={clipWood.Value}");
+                plugin.LogClip($"Clipped {tree.name}: {generatedCount} mesh LOD(s), topology={topologyCount}, {boxes.Count} obstruction box(es) [wall={wallBoxes}, beam={beamBoxes}, pole={poleBoxes}, roof={roofBoxes}], {volumes.Count} face volume(s), roofDeferred={roofsDeferred}, windGuard={windGuard.Value:F2}m, wood={clipWood.Value}");
             }
         }
 
@@ -272,6 +293,7 @@ namespace LeafClip
                 hash = hash * 31 + tree.transform.rotation.GetHashCode();
                 hash = hash * 31 + tree.transform.lossyScale.GetHashCode();
                 hash = hash * 31 + clearance.Value.GetHashCode();
+                hash = hash * 31 + windGuard.Value.GetHashCode();
                 hash = hash * 31 + clipWood.Value.GetHashCode();
                 foreach (BoxCollider box in boxes)
                 {
@@ -290,9 +312,19 @@ namespace LeafClip
         {
             if (!piece || !piece.IsPlacedByPlayer()) return false;
             string name = piece.name;
+            if (IsRoofName(name)) return includeRoofs.Value;
             return name.IndexOf(wallName.Value, StringComparison.OrdinalIgnoreCase) >= 0 ||
                    includeBeams.Value && (name.IndexOf("beam", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                           name.IndexOf("pole", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static bool IsRoofName(string name) { return name.IndexOf("roof", StringComparison.OrdinalIgnoreCase) >= 0; }
+
+        private static float HorizontalSqrDistance(Bounds bounds, Vector3 point)
+        {
+            float dx = Mathf.Max(0f, Mathf.Max(bounds.min.x - point.x, point.x - bounds.max.x));
+            float dz = Mathf.Max(0f, Mathf.Max(bounds.min.z - point.z, point.z - bounds.max.z));
+            return dx * dx + dz * dz;
         }
 
         private bool TryGetClipBounds(TreeBase tree, TreeClipState state, out Bounds bounds)
@@ -314,7 +346,7 @@ namespace LeafClip
                         (i & 4) == 0 ? -local.extents.z : local.extents.z)));
                 found = true;
             }
-            if (found) bounds.Expand(0.5f);
+            if (found) bounds.Expand(Mathf.Max(0.5f, 2f * (clearance.Value + windGuard.Value)));
             return found;
         }
 

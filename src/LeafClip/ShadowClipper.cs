@@ -13,9 +13,9 @@ namespace LeafClip
         internal FoliageSelection(int slot, bool[] triangles) { Slot = slot; Triangles = triangles; }
     }
 
-    // Cast each wall footprint edge horizontally from the trunk axis. Fir foliage
+    // Cast each obstruction footprint edge horizontally from the trunk axis. Fir foliage
     // grows outward at branch height, so a ray from the ground-level root misses
-    // foliage behind upper walls. The wall's real vertical span caps each shadow.
+    // foliage behind upper walls. Each collider's vertical span caps its shadow.
     internal sealed class ShadowVolume
     {
         internal readonly Plane[] Planes;
@@ -57,7 +57,7 @@ namespace LeafClip
             return true;
         }
 
-        internal static IEnumerable<ShadowVolume> FromBox(BoxCollider box, Vector3 origin, float clearance)
+        internal static IEnumerable<ShadowVolume> FromBox(BoxCollider box, Vector3 origin, float clearance, float windGuard, bool sliceByHeight)
         {
             Vector3 scale = box.transform.lossyScale;
             if (Mathf.Abs(scale.x) < 0.001f || Mathf.Abs(scale.y) < 0.001f || Mathf.Abs(scale.z) < 0.001f) yield break;
@@ -66,35 +66,74 @@ namespace LeafClip
             for (int i = 0; i < 8; i++)
                 corners[i] = box.transform.TransformPoint(box.center + new Vector3((i & 1) != 0 ? half.x : -half.x, (i & 2) != 0 ? half.y : -half.y, (i & 4) != 0 ? half.z : -half.z));
             float bottom = corners[0].y, top = corners[0].y;
-            var projected = new List<Vector2>(8);
             foreach (Vector3 corner in corners)
             {
-                projected.Add(new Vector2(corner.x, corner.z));
                 bottom = Mathf.Min(bottom, corner.y);
                 top = Mathf.Max(top, corner.y);
             }
-            List<Vector2> hull = ConvexHull(projected);
-            if (hull.Count < 3) yield break;
             Vector2 trunk = new Vector2(origin.x, origin.z);
-            for (int i = 0; i < hull.Count; i++)
+            int slices = sliceByHeight ? Mathf.Clamp(Mathf.CeilToInt((top - bottom) / 0.5f), 1, 4) : 1;
+            List<Vector2> fullFootprint = null;
+            if (slices == 1)
             {
-                Vector2 a = hull[i], b = hull[(i + 1) % hull.Count];
-                Vector2 edge = b - a;
-                Vector2 outward = new Vector2(edge.y, -edge.x).normalized;
-                Vector2 middle = (a + b) * 0.5f;
-                if (Vector2.Dot(outward, trunk - middle) <= 0.001f) continue;
-                if ((a - trunk).sqrMagnitude < 1e-8f || (b - trunk).sqrMagnitude < 1e-8f) continue;
-                Vector2 inward = -outward;
-                Vector2 sideA = SideNormal(trunk, a, middle), sideB = SideNormal(trunk, b, middle);
-                Plane[] planes = new Plane[5];
-                Vector2 entry = a + outward * clearance;
-                planes[0] = new Plane(new Vector3(inward.x, 0f, inward.y), new Vector3(entry.x, 0f, entry.y));
-                planes[1] = new Plane(new Vector3(sideA.x, 0f, sideA.y), origin);
-                planes[2] = new Plane(new Vector3(sideB.x, 0f, sideB.y), origin);
-                planes[3] = new Plane(Vector3.up, new Vector3(0f, bottom, 0f));
-                planes[4] = new Plane(Vector3.down, new Vector3(0f, top, 0f));
-                yield return new ShadowVolume(planes);
+                fullFootprint = new List<Vector2>(corners.Length);
+                foreach (Vector3 corner in corners) fullFootprint.Add(new Vector2(corner.x, corner.z));
             }
+            for (int slice = 0; slice < slices; slice++)
+            {
+                float low = Mathf.Lerp(bottom, top, (float)slice / slices);
+                float high = Mathf.Lerp(bottom, top, (float)(slice + 1) / slices);
+                List<Vector2> hull = ConvexHull(slices == 1 ? fullFootprint : SliceFootprint(corners, low, high));
+                if (hull.Count < 3) continue;
+                for (int i = 0; i < hull.Count; i++)
+                {
+                    Vector2 a = hull[i], b = hull[(i + 1) % hull.Count];
+                    Vector2 edge = b - a;
+                    Vector2 outward = new Vector2(edge.y, -edge.x).normalized;
+                    Vector2 middle = (a + b) * 0.5f;
+                    if (Vector2.Dot(outward, trunk - middle) <= 0.001f) continue;
+                    if ((a - trunk).sqrMagnitude < 1e-8f || (b - trunk).sqrMagnitude < 1e-8f) continue;
+                    Vector2 inward = -outward;
+                    Vector2 sideA = SideNormal(trunk, a, middle), sideB = SideNormal(trunk, b, middle);
+                    Plane[] planes = new Plane[5];
+                    Vector2 entry = a + outward * (clearance + windGuard);
+                    planes[0] = new Plane(new Vector3(inward.x, 0f, inward.y), new Vector3(entry.x, 0f, entry.y));
+                    Vector3 sideNormalA = new Vector3(sideA.x, 0f, sideA.y);
+                    Vector3 sideNormalB = new Vector3(sideB.x, 0f, sideB.y);
+                    planes[1] = new Plane(sideNormalA, origin - sideNormalA * windGuard);
+                    planes[2] = new Plane(sideNormalB, origin - sideNormalB * windGuard);
+                    planes[3] = new Plane(Vector3.up, new Vector3(0f, low, 0f));
+                    planes[4] = new Plane(Vector3.down, new Vector3(0f, high, 0f));
+                    yield return new ShadowVolume(planes);
+                }
+            }
+        }
+
+        private static List<Vector2> SliceFootprint(Vector3[] corners, float low, float high)
+        {
+            var points = new List<Vector2>(24);
+            for (int i = 0; i < corners.Length; i++)
+            {
+                Vector3 corner = corners[i];
+                if (corner.y >= low - 1e-5f && corner.y <= high + 1e-5f)
+                    points.Add(new Vector2(corner.x, corner.z));
+                for (int bit = 1; bit <= 4; bit <<= 1)
+                {
+                    if ((i & bit) != 0) continue;
+                    Vector3 other = corners[i | bit];
+                    float dy = other.y - corner.y;
+                    if (Mathf.Abs(dy) < 1e-6f) continue;
+                    for (int boundaryIndex = 0; boundaryIndex < 2; boundaryIndex++)
+                    {
+                        float boundary = boundaryIndex == 0 ? low : high;
+                        float t = (boundary - corner.y) / dy;
+                        if (t < 0f || t > 1f) continue;
+                        Vector3 point = Vector3.LerpUnclamped(corner, other, t);
+                        points.Add(new Vector2(point.x, point.z));
+                    }
+                }
+            }
+            return points;
         }
 
         private static Vector2 SideNormal(Vector2 origin, Vector2 endpoint, Vector2 inside)

@@ -42,7 +42,7 @@ namespace LeafClip
                         if (!m) { log($"  material[{i}]=null"); continue; }
                         string shader = m.shader ? m.shader.name : "missing";
                         log($"  material[{i}]={m.name} shader={shader} instancing={m.enableInstancing} keywords={string.Join(",", m.shaderKeywords)} hint={Hint(renderer.name + " " + m.name + " " + shader)} (name heuristic only)");
-                        foreach (string property in new[] { "_Cutoff", "_AlphaCutoff", "_WindStrength", "_WindScale" })
+                        foreach (string property in new[] { "_Cutoff", "_AlphaCutoff", "_SwayDistance", "_SwaySpeed", "_RippleDistance", "_RippleSpeed", "_Height", "_WindStrength", "_WindScale" })
                             if (m.HasProperty(property)) log($"   {property}={m.GetFloat(property)}");
                     }
                     if (!mesh) { log("  No MeshFilter/SkinnedMesh mesh; billboard/other renderer requires separate investigation."); continue; }
