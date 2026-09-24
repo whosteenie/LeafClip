@@ -21,6 +21,7 @@ namespace LeafClip
         private ZNetScene scene;
         private bool scheduled;
         private MeshInspector inspector;
+        private ClipPrototype clip;
 
         private void Awake()
         {
@@ -34,11 +35,13 @@ namespace LeafClip
             handledRequest = request.Value;
             configStamp = File.GetLastWriteTimeUtc(Config.ConfigFilePath);
             inspector = new MeshInspector(s => Logger.LogInfo(s));
-            Logger.LogInfo("Diagnostic-only build loaded. No clipping or network changes. Enable Diagnostics in local.leafclip.diagnostics.cfg to inspect trees.");
+            clip = new ClipPrototype(this);
+            Logger.LogInfo("Diagnostic build loaded. Mesh clipping is experimental and off by default; no network changes. Enable Diagnostics in local.leafclip.diagnostics.cfg to inspect trees.");
         }
 
         private void Update()
         {
+            clip.Update();
             if (Time.realtimeSinceStartup >= nextPoll)
             {
                 nextPoll = Time.realtimeSinceStartup + 5f;
@@ -125,6 +128,8 @@ namespace LeafClip
             Logger.LogInfo($"Scan: Unity={Application.unityVersion}, game={(global::Version.CurrentVersion)}, liveMatches={liveMatches}, prefabMatches={prefabMatches}, queued={pending.Count}, liveTruncated={liveMatches > limit.Value}, prefabTruncated={prefabMatches > limit.Value}; piece layer={LayerMask.NameToLayer("piece")}, piece_nonsolid={LayerMask.NameToLayer("piece_nonsolid")}, ghost={LayerMask.NameToLayer("ghost")}");
         }
 
-        private void OnDestroy() { pending.Clear(); probed.Clear(); }
+        internal void LogClip(string message) { Logger.LogInfo(message); }
+
+        private void OnDestroy() { clip?.Dispose(); pending.Clear(); probed.Clear(); }
     }
 }

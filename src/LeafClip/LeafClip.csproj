@@ -13,5 +13,7 @@
     <Reference Include="assembly_valheim"><HintPath>../../lib/assembly_valheim.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine"><HintPath>../../lib/UnityEngine.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.CoreModule"><HintPath>../../lib/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>../../lib/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>../../lib/0Harmony.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 </Project>

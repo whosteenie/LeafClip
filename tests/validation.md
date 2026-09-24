@@ -15,6 +15,10 @@ All runtime cases below are **pending**. Build-only validation passed; these req
 
 ## Clipping phase acceptance (future)
 
+The first guarded clipping prototype is now implemented but remains untested in Valheim. Enable `Prototype.Enabled` only for a focused test with a separate leaf material and one player-built box wall. Record a `Clipped ...` line, inspect the near and far LODs, then remove the wall and disable the prototype to verify restoration. Mixed-material pine/fir and particle leaves are known gaps, not passing cases.
+
+- With many loaded trees, confirm only trees within `MaxTreeDistance` are processed; walk across the boundary, wait five seconds, and verify meshes are generated on entry and restored on exit. Test a wall added near a previously unclipped tree, since piece notifications must queue it too.
+
 - Automated geometry tests: full keep/remove, partial triangle split, edge/vertex on boundary, near-parallel rays, origin-in-box, rotated box, nonuniform transforms, multiple obstacle union, winding, nondegenerate output, and interpolated streams. Compare retained points with trunk-to-point segment/box intersection.
 - Planted tree with adjacent wall: only obstructed portions disappear; trunk remains. Leaves behind a wall stay removed even where they extend outdoors again.
 - Naturally generated tree with adjacent wall: same result. Repeat across distinct tree layouts, including multiple biomes; no tree-name or origin configuration is required.

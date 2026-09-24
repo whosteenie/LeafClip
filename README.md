@@ -1,8 +1,8 @@
-# LeafClip diagnostic prototype
+# LeafClip diagnostic and clipping prototype
 
-Client-side investigation for Valheim **1.0.15**, BepInEx 5. This phase inspects trees; **it does not clip foliage yet**. No RPCs, world writes, renderer assignments, shared-asset edits, or server dependency. Each player will eventually need the mod for their own visuals.
+Client-side investigation for Valheim **1.0.15**, BepInEx 5. Diagnostics are opt-in. An experimental foliage clipping path is also included and **disabled by default**. It changes only local tree instance MeshFilter references; it does not change RPCs, world data, shared assets, or the server. Each player needs the mod for their own visuals.
 
-The supplied DLLs have been decompiled and the diagnostic plugin builds. The intended clipping behavior applies to both naturally generated and planted trees, without a species or origin setting. No game asset bundles, tree prefabs/meshes, shader source, or runnable game installation were supplied in this repository. In-game evidence is required to learn which foliage streams and LODs can be safely edited across tree layouts. See [assembly findings and prototype design](docs/inspection.md).
+The supplied DLLs were decompiled and two in-game diagnostic logs were inspected. The clipping code applies the same rules to naturally generated and planted trees without a species or origin setting. For now, it only edits readable meshes with a separate material whose name contains `leaf`, `leaves`, or `foliage`. Mixed trunk/foliage submeshes such as the sampled pine and fir remain unchanged. Particle leaves are outside this prototype. See [assembly findings and prototype design](docs/inspection.md).
 
 ## Build
 
@@ -12,7 +12,13 @@ Requires a .NET SDK and .NET Framework 4.7.2 targeting pack. Tested with SDK 5.0
 dotnet build src/LeafClip/LeafClip.csproj --configuration Debug
 ```
 
-Output: `src/LeafClip/bin/Debug/net472/LeafClip.dll`. Install only that DLL under `BepInEx/plugins/LeafClip/` in your client. Do not deploy reference DLLs from `lib/`. This is a diagnostic build, not a release.
+Output: `src/LeafClip/bin/Debug/net472/LeafClip.dll`. Install only that DLL under `BepInEx/plugins/LeafClip/` in your client. Do not deploy reference DLLs from `lib/`. This is an experimental build, not a release.
+
+## Test experimental clipping
+
+The new build has not yet been run in Valheim. Start with a test world and a normal player-built box-collider wall close to a beech, birch, or YggaShoot tree. The diagnostic logs show separate leaf material slots for these trees. Set `Prototype.Enabled = true` in `BepInEx/config/local.leafclip.diagnostics.cfg`. `Prototype.WallNameContains = wall` restricts obstruction pieces to names containing `wall`; set it to a different substring if your wall prefab is named differently. `Prototype.Clearance` starts at 0.5 m, `Prototype.SearchRadius` at 18 m, and `Prototype.MaxTreeDistance` at 100 m from the local player. The last value is a prototype work limit, not a confirmed Valheim render-distance setting. Trees entering or leaving that range are checked every five seconds; leaving restores their original mesh. Restarting the client after enabling gives lifecycle hooks a clean run.
+
+Look for `Clipped ...` or `Skipped ...` entries and check both close and distant LODs. Expected result for supported meshes: leaf triangles behind the wall disappear while trunk geometry and leaf triangles on the trunk side remain. Add/remove a wall after load; the affected tree should rebuild. With `Prototype.Enabled = false`, generated meshes are restored/released. Pine and fir in the current log should show no clipping because their sampled mesh has a single mixed material. No `Clipped ...` line for a supported tree means the tree, wall, or foliage-slot filter did not match, or no triangles crossed the computed obstruction. A diagnostic log and a short description of what changed visually are needed before broadening support. This prototype is deliberately guarded: unknown layouts are not clipped, and a successful build is not a visual test.
 
 ## Capture a tree
 
