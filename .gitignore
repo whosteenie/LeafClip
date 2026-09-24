@@ -1,0 +1,54 @@
+# Local game and mod-loader assemblies
+lib/*.dll
+*.dll
+*.pdb
+*.deps.json
+
+# .NET build output
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+
+# NuGet and local tooling
+packages/
+*.nupkg
+.nuget/
+.tools/
+
+# IDE and user-specific settings
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Runtime installations, configuration, and logs
+BepInEx/
+doorstop_libs/
+*.log
+LogOutput.log
+
+# Valheim worlds, characters, and backups
+worlds/
+worlds_local/
+characters/
+characters_local/
+*.db
+*.db.old
+*.db2
+*.fwl
+*.fwl.old
+*.fwl2
+*.fch
+*.fch.old
+*.chunk
+*.chunks
+*.backup
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
