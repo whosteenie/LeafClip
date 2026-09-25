@@ -10,7 +10,7 @@ namespace LeafClip
 {
     // Post-wind clipping. Original topology/vertex streams are
     // cloned only to obtain private draw identities; no vertices are cut or moved.
-    internal sealed class GpuClipPrototype : IDisposable
+    internal sealed class GpuClip : IDisposable
     {
         private sealed class MeshEntry
         {
@@ -43,7 +43,7 @@ namespace LeafClip
             internal CommandBuffer Begin, End;
             internal bool RenderToTexture;
         }
-        internal static GpuClipPrototype Current;
+        internal static GpuClip Current;
         private readonly Plugin plugin;
         private readonly ConfigEntry<float> distance, boundsPadding;
         private readonly HashSet<TreeBase> known = new HashSet<TreeBase>();
@@ -66,7 +66,7 @@ namespace LeafClip
         private readonly StringBuilder message = new StringBuilder(2048);
         internal bool Active => initialized;
 
-        internal GpuClipPrototype(Plugin plugin)
+        internal GpuClip(Plugin plugin)
         {
             this.plugin = plugin;
             distance = plugin.Config.Bind("GpuClip", "MaxTreeDistance", 64f, new ConfigDescription("Process trees this close to the player when they intersect player-built structures.", new AcceptableValueRange<float>(10f, 150f)));
@@ -98,7 +98,7 @@ namespace LeafClip
                 }
                 initialized = native.Initialize(marker.GetNativeTexturePtr()) != 0;
                 if (!initialized) throw new InvalidOperationException("Native initialization failed; inspect native messages.");
-                plugin.LogClip("D3D11 clipping active. Existing Prototype/GpuClip Enabled, MaxTrees and TreeNameContains settings are ignored.");
+                plugin.LogClip("D3D11 clipping active.");
             }
             catch (Exception ex) { plugin.LogClip("LeafClip renderer unavailable: " + ex.Message); }
         }

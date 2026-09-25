@@ -9,8 +9,6 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="ClipPrototype.cs" />
-    <Compile Remove="ShadowClipper.cs" />
     <Reference Include="BepInEx"><HintPath>../../lib/BepInEx.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="assembly_valheim"><HintPath>../../lib/assembly_valheim.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine"><HintPath>../../lib/UnityEngine.dll</HintPath><Private>false</Private></Reference>

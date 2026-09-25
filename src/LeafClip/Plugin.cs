@@ -22,7 +22,7 @@ namespace LeafClip
         private ZNetScene scene;
         private bool scheduled;
         private MeshInspector inspector;
-        private GpuClipPrototype gpu;
+        private GpuClip gpu;
         private Harmony harmony;
 
         private void Awake()
@@ -37,10 +37,10 @@ namespace LeafClip
             handledRequest = request.Value;
             configStamp = File.GetLastWriteTimeUtc(Config.ConfigFilePath);
             inspector = new MeshInspector(s => Logger.LogInfo(s));
-            gpu = new GpuClipPrototype(this);
+            gpu = new GpuClip(this);
             harmony = new Harmony("local.leafclip.runtime");
             harmony.PatchAll(typeof(Plugin).Assembly);
-            Logger.LogInfo("LeafClip loaded. D3D11 clipping starts automatically; older Prototype/GpuClip Enabled entries are ignored.");
+            Logger.LogInfo("LeafClip loaded. GPU clipping initializes automatically on supported renderers.");
         }
 
         private void Update()
