@@ -128,6 +128,8 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
     bool hide=false;
     bool wallHit=false;
     bool spanRejected=false;
+    bool spanBoundsConflict=false;
+    float spanOverrun=1e20;
     uint selection=eligible[triangleBase+primitive];
     bool branchPixel=selection==2 && length(p.xz-tree.xz)>=tree.w;
     if(enabled!=0 && (selection==1 || branchPixel || selection==3)) {
@@ -176,11 +178,25 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                             // A per-triangle span makes a tessellated wall open
                             // seams as foliage sways across internal edges.
                             float margin=0.06;
-                            if(normal.x>=normal.y && normal.x>=normal.z)
-                                hide=p.z>=v0.w-margin && p.z<=v1.w+margin;
-                            else if(normal.z>=normal.y)
-                                hide=p.x>=v0.w-margin && p.x<=v1.w+margin;
-                            if(!hide) spanRejected=true;
+                            bool xFacing=normal.x>=normal.y && normal.x>=normal.z;
+                            bool zFacing=normal.z>=normal.y && normal.z>=normal.x;
+                            if(xFacing || zFacing) {
+                                // The ray has already crossed this exact wall
+                                // triangle. Test the crossing point, not the
+                                // distant leaf endpoint: beech branches can
+                                // extend far past a short wall after crossing it.
+                                float3 crossing=start+direction*t;
+                                float lateral=xFacing?crossing.z:crossing.x;
+                                hide=lateral>=v0.w-margin && lateral<=v1.w+margin;
+                                if(!hide) {
+                                    spanRejected=true;
+                                    spanOverrun=min(spanOverrun,max(v0.w-lateral,lateral-v1.w)-margin);
+                                    float triangleLow=xFacing?min(v0.z,min(v1.z,v2.z)):min(v0.x,min(v1.x,v2.x));
+                                    float triangleHigh=xFacing?max(v0.z,max(v1.z,v2.z)):max(v0.x,max(v1.x,v2.x));
+                                    spanBoundsConflict=spanBoundsConflict ||
+                                        (lateral>=triangleLow-margin && lateral<=triangleHigh+margin);
+                                }
+                            }
                         }
                     }
                 }
@@ -296,7 +312,10 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
         const char* colors=
             "    float4 result=float4(0.05,0.2,1,1);\n"
             "    result=wallHit?float4(0,1,1,1):result;\n"
-            "    result=spanRejected?float4(1,0.9,0,1):result;\n"
+            "    float4 spanColor=spanOverrun<0.15?float4(1,0.9,0,1):\n"
+            "        (spanOverrun<0.75?float4(1,0.4,0,1):float4(1,1,1,1));\n"
+            "    spanColor=spanBoundsConflict?float4(0.4,1,0,1):spanColor;\n"
+            "    result=spanRejected?spanColor:result;\n"
             "    result=hide?float4(1,0.05,0.05,1):result;\n"
             "    result=(selection==0 || (selection==2 && !branchPixel))?float4(0.7,0,0.8,1):result;\n";
         if(emission) replace("    clip(hide?-1:1);",

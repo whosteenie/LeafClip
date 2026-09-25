@@ -1,5 +1,6 @@
 #include "ShaderPatch.h"
 #include "Native.h"
+#include "Geometry.h"
 #include <DirectXMath.h>
 #include <array>
 #include <chrono>
@@ -210,6 +211,45 @@ int main(int argc,char** argv) {
             "deferred diagnostic did not write full-color emission with black diffuse: red="+
             std::to_string(emissionRed)+" blue="+std::to_string(emissionBlue)+
             " diffuse="+std::to_string(diffuseBright));
+        auto spanImage=[&](float wallHalfWidth,float storedHalfWidth) {
+            const float wall[]={0,-1,-wallHalfWidth, 0,-1,wallHalfWidth, 0,1,wallHalfWidth,
+                                -storedHalfWidth,storedHalfWidth,
+                                0,-1,-wallHalfWidth, 0,1,wallHalfWidth, 0,1,-wallHalfWidth,
+                                -storedHalfWidth,storedHalfWidth};
+            GeometryData geometry=BuildGeometry(nullptr,0,wall,2);
+            auto nodeBuffer=h.Buffer(UINT(geometry.nodes.size()*sizeof(geometry.nodes[0])),
+                D3D11_BIND_SHADER_RESOURCE,geometry.nodes.data());
+            auto primitiveBuffer=h.Buffer(UINT(geometry.primitives.size()*sizeof(geometry.primitives[0])),
+                D3D11_BIND_SHADER_RESOURCE,geometry.primitives.data());
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;
+            ComPtr<ID3D11ShaderResourceView> nodes,primitives;
+            view.Format=DXGI_FORMAT_R32G32B32A32_UINT;view.Buffer.NumElements=UINT(geometry.nodes.size());
+            Check(h.device->CreateShaderResourceView(nodeBuffer.Get(),&view,&nodes),"span diagnostic nodes");
+            view.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;view.Buffer.NumElements=UINT(geometry.primitives.size());
+            Check(h.device->CreateShaderResourceView(primitiveBuffer.Get(),&view,&primitives),"span diagnostic primitives");
+            auto primitiveView=primitives.Get();auto nodeView=nodes.Get();
+            h.context->PSSetShaderResources(125,1,&primitiveView);
+            h.context->PSSetShaderResources(126,1,&nodeView);
+            h.params.tree[0]=-.2f;h.params.tree[2]=0;
+            h.params.boxCount=UINT(geometry.nodes.size()/2);h.params.reserved=1;h.SetFrame(0,0);
+            return h.Draw(diagnosticShader.Get());
+        };
+        Image beyondPiece=spanImage(.25f,.25f),wrongBounds=spanImage(.75f,.1f);
+        size_t distalRed=0,lime=0;
+        for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
+            float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
+            const Pixel& pixel=beyondPiece.pixels[y*Harness::Size+x];
+            // The leaf endpoint lies at z=0.5, beyond the stored +/-0.25
+            // span; only its ray crossing lies inside the actual wall.
+            if(worldX>.3f && pixel.r>.9f && pixel.g<.1f && pixel.b<.1f)++distalRed;
+        }
+        for(const Pixel& pixel:wrongBounds.pixels)
+            if(pixel.r>.3f && pixel.r<.5f && pixel.g>.9f && pixel.b<.1f)++lime;
+        Require(distalRed>20 && lime>20,"span diagnostic failed to retain distal leaves behind a real wall crossing while marking incorrect bounds: red="+
+            std::to_string(distalRed)+" lime="+std::to_string(lime));
+        ID3D11ShaderResourceView* empty=nullptr;
+        h.context->PSSetShaderResources(125,1,&empty);h.context->PSSetShaderResources(126,1,&empty);
+        h.params.tree[0]=-2;h.params.boxCount=1;h.params.reserved=0;
         auto worldCode=Compile(R"(
             float4 main(float4 p:SV_Position,float4 x:TEXCOORD1,float4 y:TEXCOORD2,
                         float4 z:TEXCOORD3):SV_Target {

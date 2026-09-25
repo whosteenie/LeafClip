@@ -3,7 +3,7 @@
     <TargetFramework>net472</TargetFramework>
     <LangVersion>9.0</LangVersion>
     <AssemblyName>LeafClip</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>0.3.0</Version>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>

@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace LeafClip
 {
-    [BepInPlugin("local.leafclip.diagnostics", "LeafClip", "0.2.0")]
+    [BepInPlugin("local.leafclip", "LeafClip", "0.3.0")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private ConfigEntry<bool> diagnostics, prefabs, probe;
@@ -35,9 +35,12 @@ namespace LeafClip
             limit = Config.Bind("Diagnostics", "MaxTrees", 12, new ConfigDescription("Maximum loaded trees and maximum prefabs per scan, counted separately; a scan may be incomplete.", new AcceptableValueRange<int>(1, 500)));
             vertexLimit = Config.Bind("Diagnostics", "MaxProbeVertices", 100000, new ConfigDescription("Skip mesh-copy probes above this vertex count.", new AcceptableValueRange<int>(1, 1000000)));
             handledRequest = request.Value;
-            configStamp = File.GetLastWriteTimeUtc(Config.ConfigFilePath);
             inspector = new MeshInspector(s => Logger.LogInfo(s));
             gpu = new GpuClip(this);
+            // Persist every bound entry and the current plugin-version header
+            // on first launch, including the settings bound by GpuClip.
+            Config.Save();
+            configStamp = File.GetLastWriteTimeUtc(Config.ConfigFilePath);
             harmony = new Harmony("local.leafclip.runtime");
             harmony.PatchAll(typeof(Plugin).Assembly);
             Logger.LogInfo("LeafClip loaded. GPU clipping initializes automatically on supported renderers.");

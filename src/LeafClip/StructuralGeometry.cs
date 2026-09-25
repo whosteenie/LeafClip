@@ -8,6 +8,12 @@ namespace LeafClip
     // the native geometry worker. Shared collider meshes are read once per world.
     internal sealed class StructuralGeometry
     {
+        internal struct SpanOutline
+        {
+            internal Bounds SourceBounds;
+            internal float PackedLow, PackedHigh;
+            internal bool AlongX;
+        }
         private sealed class Source
         {
             internal Vector3[] Vertices;
@@ -24,16 +30,24 @@ namespace LeafClip
             internal int First, End, Parent;
             internal bool AlongX;
         }
+        private struct VisualRange
+        {
+            internal Bounds Bounds;
+            internal int First, End;
+        }
         private readonly Dictionary<Mesh, Source> sources = new Dictionary<Mesh, Source>();
         private readonly Dictionary<Piece, CachedPiece> pieces = new Dictionary<Piece, CachedPiece>();
         internal void Clear() { sources.Clear(); pieces.Clear(); }
         internal void Invalidate(Piece piece) { if (piece) pieces.Remove(piece); }
-        internal void Snapshot(List<Collider> colliders, Bounds influence, out float[] boxes, out float[] triangles, out int visualPieceCount, out int fallbackPieceCount, out int wallCandidates, out int joinedWalls, out int skipped)
+        internal void Snapshot(List<Collider> colliders, Bounds influence, bool collectSpanOutlines,
+            out float[] boxes, out float[] triangles, out List<SpanOutline> spanOutlines,
+            out int visualPieceCount, out int fallbackPieceCount, out int wallCandidates, out int joinedWalls, out int skipped)
         {
             var boxData = new List<float>();
             var triangleData = new List<float>();
             var renderedPieces = new HashSet<Piece>();
             var wallRanges = new List<WallRange>();
+            var visualRanges = collectSpanOutlines ? new List<VisualRange>() : null;
             var colliderPieces = new HashSet<Piece>();
             var fallbackPieces = new HashSet<Piece>();
             skipped = 0;
@@ -48,6 +62,9 @@ namespace LeafClip
                     if (AppendVisualSurfaces(piece, influence, triangleData))
                     {
                         renderedPieces.Add(piece);
+                        if (collectSpanOutlines && triangleData.Count > first)
+                            visualRanges.Add(new VisualRange { Bounds = pieces[piece].Bounds,
+                                First = first, End = triangleData.Count });
                         if (triangleData.Count > first && (piece.m_usage & Piece.UsageTagFlags.Wall) != 0)
                         {
                             Bounds bounds = pieces[piece].Bounds;
@@ -62,6 +79,7 @@ namespace LeafClip
             }
             wallCandidates = wallRanges.Count;
             joinedWalls = MergeWallSpans(wallRanges, triangleData);
+            spanOutlines = collectSpanOutlines ? CollectSpanOutlines(visualRanges, triangleData) : new List<SpanOutline>();
             foreach (Collider collider in colliders)
             {
                 if (!collider || !collider.enabled || !collider.gameObject.activeInHierarchy) continue;
@@ -118,6 +136,35 @@ namespace LeafClip
                 index = walls[index].Parent;
             }
             return index;
+        }
+        private static List<SpanOutline> CollectSpanOutlines(List<VisualRange> surfaces, List<float> triangles)
+        {
+            var result = new List<SpanOutline>(surfaces.Count * 2);
+            foreach (VisualRange surface in surfaces)
+            {
+                bool foundX = false, foundZ = false;
+                for (int at = surface.First; at < surface.End; at += 11)
+                {
+                    Vector3 a = new Vector3(triangles[at], triangles[at + 1], triangles[at + 2]);
+                    Vector3 b = new Vector3(triangles[at + 3], triangles[at + 4], triangles[at + 5]);
+                    Vector3 c = new Vector3(triangles[at + 6], triangles[at + 7], triangles[at + 8]);
+                    Vector3 normal = Vector3.Cross(b - a, c - a);
+                    float x = Mathf.Abs(normal.x), y = Mathf.Abs(normal.y), z = Mathf.Abs(normal.z);
+                    if (Mathf.Max(x, z) <= 1e-8f || Mathf.Max(x, z) < y) continue;
+                    // Match the shader's tie-breaking: an X-facing triangle
+                    // checks the Z span; a Z-facing triangle checks X.
+                    bool alongX = z > x;
+                    if (alongX ? foundZ : foundX) continue;
+                    // These are the final two values sent to the native shader,
+                    // after any snapped-wall span merge, not a recomputation.
+                    result.Add(new SpanOutline { SourceBounds = surface.Bounds,
+                        PackedLow = triangles[at + 9], PackedHigh = triangles[at + 10],
+                        AlongX = alongX });
+                    if (alongX) foundZ = true; else foundX = true;
+                    if (foundX && foundZ) break;
+                }
+            }
+            return result;
         }
         private static int MergeWallSpans(List<WallRange> walls, List<float> triangles)
         {

@@ -36,6 +36,7 @@ namespace LeafClip
             internal int PendingSignature;
             internal int Revision, PendingRevision;
             internal float[] PendingOrigin;
+            internal readonly List<GameObject> SpanLines = new List<GameObject>();
         }
         private sealed class CameraScope
         {
@@ -47,6 +48,7 @@ namespace LeafClip
         private readonly Plugin plugin;
         private readonly ConfigEntry<float> distance, boundsPadding;
         private readonly ConfigEntry<bool> visualizeClipping;
+        private readonly bool visualModeAtStartup;
         private readonly HashSet<TreeBase> known = new HashSet<TreeBase>();
         private readonly Dictionary<TreeBase, List<Bounds>> dormant = new Dictionary<TreeBase, List<Bounds>>();
         private readonly List<TreeEntry> active = new List<TreeEntry>();
@@ -56,6 +58,7 @@ namespace LeafClip
         private readonly HashSet<int> unsupported = new HashSet<int>();
         private NativeClipBridge native;
         private Texture2D marker;
+        private Material spanMaterial;
         private bool initialized;
         private bool probing12;
         private float nextSelection, nextGeometry, nextReport;
@@ -73,7 +76,8 @@ namespace LeafClip
             distance = plugin.Config.Bind("GpuClip", "MaxTreeDistance", 64f, new ConfigDescription("Process trees this close to the player when they intersect player-built structures.", new AcceptableValueRange<float>(10f, 150f)));
             boundsPadding = plugin.Config.Bind("GpuClip", "WindBoundsPadding", 3f, new ConfigDescription("Broad-phase/culling envelope only; never expands the actual clipping boundary.", new AcceptableValueRange<float>(0f, 20f)));
             visualizeClipping = plugin.Config.Bind("Diagnostics", "VisualizeClipping", false,
-                "D3D12 only: color tree pixels by clipping decision instead of hiding them. Red=would hide, yellow=wall hit rejected by span check, blue=no wall hit, purple=excluded, cyan=kept by another rule. Requires a game restart.");
+                "D3D12 only: color tree pixels by clipping decision and outline nearby structure spans. Red=would hide; yellow/orange/white=wall crossing rejected increasingly far beyond its span; lime=span metadata conflict; blue=no wall hit; purple=excluded. Magenta=world-aligned renderer bounds; cyan=world-aligned span sent to shader. Outlines do not follow the structure's rotation. Requires a game restart.");
+            visualModeAtStartup = visualizeClipping.Value;
             Current = this;
             Camera.onPreCull += BeforeCamera;
             Initialize();
@@ -92,13 +96,13 @@ namespace LeafClip
                 marker.Apply();
                 if (backend == GraphicsDeviceType.Direct3D12)
                 {
-                    if (native.SetVisualDiagnostic12(visualizeClipping.Value ? 1 : 0) == 0)
+                    if (native.SetVisualDiagnostic12(visualModeAtStartup ? 1 : 0) == 0)
                         throw new InvalidOperationException("D3D12 visual diagnostic setup failed.");
                     probing12 = native.Initialize12(marker.GetNativeTexturePtr()) != 0;
                     if (!probing12) throw new InvalidOperationException("D3D12 initialization failed; inspect native messages.");
                     initialized = native.Enable12(1) != 0;
                     if (!initialized) throw new InvalidOperationException("D3D12 clipping activation failed; inspect native messages.");
-                    plugin.LogClip(visualizeClipping.Value ? "D3D12 clipping visual diagnostic active." : "D3D12 clipping active.");
+                    plugin.LogClip(visualModeAtStartup ? "D3D12 clipping visual diagnostic active." : "D3D12 clipping active.");
                     return;
                 }
                 initialized = native.Initialize(marker.GetNativeTexturePtr()) != 0;
@@ -438,7 +442,14 @@ namespace LeafClip
             // uncropped warmup is preferable to an obsolete cut after demolition.
             ClearBoxes(tree);
             tree.Signature = signature; tree.HasSignature = true;
-            geometry.Snapshot(tree.Colliders, tree.Bounds, out float[] boxes, out float[] triangles, out int visualPieces, out int fallbackPieces, out int wallCandidates, out int joinedWalls, out int skipped);
+            geometry.Snapshot(tree.Colliders, tree.Bounds, visualModeAtStartup && probing12,
+                out float[] boxes, out float[] triangles, out List<StructuralGeometry.SpanOutline> spanOutlines,
+                out int visualPieces, out int fallbackPieces, out int wallCandidates, out int joinedWalls, out int skipped);
+            if (visualModeAtStartup && probing12)
+            {
+                try { ShowSpanOutlines(tree, spanOutlines); }
+                catch (Exception ex) { ClearSpanOutlines(tree); plugin.LogClip("Span overlay failed: " + ex.Message); }
+            }
             Vector3 origin = tree.Tree.transform.position;
             tree.PendingOrigin = new[] { origin.x, origin.y, origin.z };
             tree.PendingSignature = signature;
@@ -448,7 +459,81 @@ namespace LeafClip
         }
         private void ClearBoxes(TreeEntry tree)
         {
+            ClearSpanOutlines(tree);
             foreach (MeshEntry mesh in tree.Meshes) native.BindGeometry(mesh.Buffer, new float[3], 0);
+        }
+        private void ShowSpanOutlines(TreeEntry tree, List<StructuralGeometry.SpanOutline> spans)
+        {
+            if (spans.Count == 0)
+            {
+                plugin.LogClip("Span overlay: no visual vertical surfaces supplied a shader span for this tree.");
+                return;
+            }
+            if (!spanMaterial)
+            {
+                Shader shader = Shader.Find("Hidden/Internal-Colored");
+                bool drawOnTop = shader;
+                if (!shader) shader = Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default");
+                if (!shader) { plugin.LogClip("Span overlay shader unavailable."); return; }
+                spanMaterial = new Material(shader) { hideFlags = HideFlags.DontSave };
+                if (drawOnTop)
+                {
+                    spanMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+                    spanMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+                    spanMaterial.SetInt("_Cull", (int)CullMode.Off);
+                    spanMaterial.SetInt("_ZWrite", 0);
+                    spanMaterial.SetInt("_ZTest", (int)CompareFunction.Always);
+                    spanMaterial.renderQueue = (int)RenderQueue.Overlay;
+                }
+            }
+            Vector3 viewer = Player.m_localPlayer.transform.position;
+            spans.Sort((a, b) => (a.SourceBounds.center - viewer).sqrMagnitude
+                .CompareTo((b.SourceBounds.center - viewer).sqrMagnitude));
+            int shown = 0;
+            foreach (StructuralGeometry.SpanOutline span in spans)
+            {
+                if ((span.SourceBounds.center - viewer).sqrMagnitude > 30f * 30f) continue;
+                if (shown++ >= 64) break;
+                // Both frames are world-aligned projections, not outlines of
+                // rotated mesh triangles. Magenta shows the source bounds;
+                // cyan shows the final low/high pair sent to the shader.
+                AddSpanFrame(tree, span, span.AlongX ? span.SourceBounds.min.x : span.SourceBounds.min.z,
+                    span.AlongX ? span.SourceBounds.max.x : span.SourceBounds.max.z,
+                    0.055f, Color.magenta, "source bounds");
+                AddSpanFrame(tree, span, span.PackedLow, span.PackedHigh,
+                    0.11f, Color.cyan, "shader span");
+            }
+            plugin.LogClip($"Span overlay: {Mathf.Min(shown, 64)} nearby world-aligned span frames; magenta=source renderer bounds, cyan=shader span (rotated mesh faces are not outlined).");
+        }
+        private void AddSpanFrame(TreeEntry tree, StructuralGeometry.SpanOutline span,
+            float low, float high, float offset, Color color, string label)
+        {
+            Bounds bounds = span.SourceBounds;
+            for (int side = 0; side < 2; side++)
+            {
+                float plane = span.AlongX
+                    ? (side == 0 ? bounds.min.z - offset : bounds.max.z + offset)
+                    : (side == 0 ? bounds.min.x - offset : bounds.max.x + offset);
+                Vector3 corner(float lateral, float y) => span.AlongX
+                    ? new Vector3(lateral, y, plane) : new Vector3(plane, y, lateral);
+                var go = new GameObject("LeafClip " + label) { hideFlags = HideFlags.DontSave };
+                LineRenderer line = go.AddComponent<LineRenderer>();
+                line.sharedMaterial = spanMaterial;
+                line.useWorldSpace = true;
+                line.positionCount = 5;
+                line.widthMultiplier = 0.045f;
+                line.startColor = line.endColor = color;
+                line.shadowCastingMode = ShadowCastingMode.Off;
+                line.receiveShadows = false;
+                line.SetPositions(new[] { corner(low, bounds.min.y), corner(high, bounds.min.y),
+                    corner(high, bounds.max.y), corner(low, bounds.max.y), corner(low, bounds.min.y) });
+                tree.SpanLines.Add(go);
+            }
+        }
+        private static void ClearSpanOutlines(TreeEntry tree)
+        {
+            foreach (GameObject line in tree.SpanLines) if (line) UnityEngine.Object.Destroy(line);
+            tree.SpanLines.Clear();
         }
         private void BeforeCamera(Camera current)
         {
@@ -504,6 +589,7 @@ namespace LeafClip
         }
         private void Restore(TreeEntry tree)
         {
+            ClearSpanOutlines(tree);
             if (tree.Pending != null)
             {
                 // Keep no Unity references on this continuation. Native handles
@@ -539,6 +625,7 @@ namespace LeafClip
             Camera.onPreCull -= BeforeCamera;
             DetachCamera(); RestoreAll(); native?.Shutdown();
             if (marker) UnityEngine.Object.Destroy(marker);
+            if (spanMaterial) UnityEngine.Object.Destroy(spanMaterial);
             known.Clear(); masks.Clear(); geometry.Clear(); Current = null;
         }
     }
