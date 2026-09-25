@@ -10,6 +10,8 @@
 LC_API int LC_Initialize(void* d3dResource);
 // D3D12 capture probe; never modifies a draw until PSO/root bindings are validated.
 LC_API int LC_Initialize12(void* d3dResource);
+// Set before initialization; visual mode colors clipping decisions instead of discarding foliage.
+LC_API int LC_SetVisualDiagnostic12(int enabled);
 LC_API int LC_Enable12(int enabled);
 LC_API int LC_SetFallbackCamera12(const float* backbufferInverse,const float* textureInverse,int width,int height);
 LC_API void LC_GetStats12(uint64_t* values,int count);

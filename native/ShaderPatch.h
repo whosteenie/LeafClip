@@ -21,5 +21,6 @@ static_assert(sizeof(ClipConstants) % 16 == 0, "constant buffer alignment");
 ComPtr<ID3DBlob> Compile(const std::string& source, const char* profile);
 // The original shader's executable body is copied verbatim. Only the helper's
 // registers are relocated. Unsupported layouts throw and must render unmodified.
-std::vector<uint8_t> PatchPixelShader(const void* data, size_t size, bool useAnimatedWorldPosition=false);
+std::vector<uint8_t> PatchPixelShader(const void* data, size_t size, bool useAnimatedWorldPosition=false,
+    bool visualDiagnostic=false);
 }

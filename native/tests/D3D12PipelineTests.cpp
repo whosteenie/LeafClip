@@ -21,6 +21,8 @@ template<class T> struct alignas(void*) StreamField {D3D12_PIPELINE_STATE_SUBOBJ
 }
 int main() {
     try {
+        if(LC_GetApiVersion()!=9 || !LC_SetVisualDiagnostic12(0))
+            throw std::runtime_error("D3D12 visual diagnostic startup setting failed");
         ComPtr<IDXGIFactory4> factory;
         Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"DXGI factory");
         ComPtr<IDXGIAdapter> adapter;
@@ -36,6 +38,8 @@ int main() {
         ComPtr<ID3D12Resource> marker;
         Check(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&textureDesc,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&marker)),"probe marker");
         if(!LC_Initialize12(marker.Get()))throw std::runtime_error("native D3D12 probe initialization failed");
+        if(LC_SetVisualDiagnostic12(1))
+            throw std::runtime_error("D3D12 visual diagnostic changed after initialization");
         auto vs=Compile("float4 main(float3 pos:POSITION):SV_Position{return float4(pos,1);}","vs_5_0");
         auto ps=Compile("float4 main(float4 p:SV_Position):SV_Target{return float4(p.z,0,0,1);}","ps_5_0");
         auto patched=PatchPixelShader(ps->GetBufferPointer(),ps->GetBufferSize());

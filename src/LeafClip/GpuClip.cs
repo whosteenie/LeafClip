@@ -46,6 +46,7 @@ namespace LeafClip
         internal static GpuClip Current;
         private readonly Plugin plugin;
         private readonly ConfigEntry<float> distance, boundsPadding;
+        private readonly ConfigEntry<bool> visualizeClipping;
         private readonly HashSet<TreeBase> known = new HashSet<TreeBase>();
         private readonly Dictionary<TreeBase, List<Bounds>> dormant = new Dictionary<TreeBase, List<Bounds>>();
         private readonly List<TreeEntry> active = new List<TreeEntry>();
@@ -71,6 +72,8 @@ namespace LeafClip
             this.plugin = plugin;
             distance = plugin.Config.Bind("GpuClip", "MaxTreeDistance", 64f, new ConfigDescription("Process trees this close to the player when they intersect player-built structures.", new AcceptableValueRange<float>(10f, 150f)));
             boundsPadding = plugin.Config.Bind("GpuClip", "WindBoundsPadding", 3f, new ConfigDescription("Broad-phase/culling envelope only; never expands the actual clipping boundary.", new AcceptableValueRange<float>(0f, 20f)));
+            visualizeClipping = plugin.Config.Bind("Diagnostics", "VisualizeClipping", false,
+                "D3D12 only: color tree pixels by clipping decision instead of hiding them. Red=would hide, yellow=wall hit rejected by span check, blue=no wall hit, purple=excluded, cyan=kept by another rule. Requires a game restart.");
             Current = this;
             Camera.onPreCull += BeforeCamera;
             Initialize();
@@ -89,11 +92,13 @@ namespace LeafClip
                 marker.Apply();
                 if (backend == GraphicsDeviceType.Direct3D12)
                 {
+                    if (native.SetVisualDiagnostic12(visualizeClipping.Value ? 1 : 0) == 0)
+                        throw new InvalidOperationException("D3D12 visual diagnostic setup failed.");
                     probing12 = native.Initialize12(marker.GetNativeTexturePtr()) != 0;
                     if (!probing12) throw new InvalidOperationException("D3D12 initialization failed; inspect native messages.");
                     initialized = native.Enable12(1) != 0;
                     if (!initialized) throw new InvalidOperationException("D3D12 clipping activation failed; inspect native messages.");
-                    plugin.LogClip("D3D12 clipping active.");
+                    plugin.LogClip(visualizeClipping.Value ? "D3D12 clipping visual diagnostic active." : "D3D12 clipping active.");
                     return;
                 }
                 initialized = native.Initialize(marker.GetNativeTexturePtr()) != 0;

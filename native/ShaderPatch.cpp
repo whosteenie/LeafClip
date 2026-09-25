@@ -126,6 +126,8 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
     float3 p=hp.xyz/hp.w;
     float3 start=float3(tree.x,p.y,tree.z);
     bool hide=false;
+    bool wallHit=false;
+    bool spanRejected=false;
     uint selection=eligible[triangleBase+primitive];
     bool branchPixel=selection==2 && length(p.xz-tree.xz)>=tree.w;
     if(enabled!=0 && (selection==1 || branchPixel || selection==3)) {
@@ -155,6 +157,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                     hit=slab(a.x,d.x,low,high);
                     hit=slab(a.y,d.y,low,high) && hit;
                     hide=slab(a.z,d.z,low,high) && hit;
+                    wallHit=wallHit || hide;
                 } else {
                     // Two-sided segment/triangle intersection; no face-normal or
                     // winding assumption about imported collider meshes.
@@ -166,6 +169,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                         float t=dot(e2,r)/determinant;
                         hide=u>=0 && v>=0 && u+v<=1 && t>=0 && t<=1;
                         if(hide) {
+                            wallHit=true;
                             float3 normal=abs(cross(e1,e2));
                             if(selection==3 && normal.y>=max(normal.x,normal.z)) {hide=false;continue;}
                             // Use the whole building piece's horizontal span.
@@ -176,6 +180,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                                 hide=p.z>=v0.w-margin && p.z<=v1.w+margin;
                             else if(normal.z>=normal.y)
                                 hide=p.x>=v0.w-margin && p.x<=v1.w+margin;
+                            if(!hide) spanRejected=true;
                         }
                     }
                 }
@@ -188,6 +193,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
             hit=slab(a.y,d.y,low,high) && hit;
             hit=slab(a.z,d.z,low,high) && hit;
             hide=hide || hit;
+            wallHit=wallHit || hit;
         }
     }
     clip(hide?-1:1);
@@ -200,9 +206,27 @@ ComPtr<ID3DBlob> Compile(const std::string& source,const char* profile) {
     if(FAILED(hr)) throw std::runtime_error(error?std::string((char*)error->GetBufferPointer(),error->GetBufferSize()):"D3DCompile failed");
     return code;
 }
-std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnimatedWorldPosition) {
+std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnimatedWorldPosition,bool visualDiagnostic) {
     auto chunks=Read(data,size);
     auto original=Instructions(Program(chunks).words);
+    bool emissionDiagnostic=false;
+    if(visualDiagnostic) {
+        ComPtr<ID3D11ShaderReflection> reflection;
+        if(SUCCEEDED(D3DReflect(data,size,IID_PPV_ARGS(&reflection)))) {
+            D3D11_SHADER_DESC desc{};
+            if(SUCCEEDED(reflection->GetDesc(&desc))) {
+                unsigned outputs=0;
+                for(unsigned i=0;i<desc.OutputParameters;++i) {
+                    D3D11_SIGNATURE_PARAMETER_DESC parameter{};
+                    if(SUCCEEDED(reflection->GetOutputParameterDesc(i,&parameter)) &&
+                       parameter.SemanticName && _stricmp(parameter.SemanticName,"SV_Target")==0 &&
+                       (parameter.SemanticIndex==0 || parameter.SemanticIndex==1 || parameter.SemanticIndex==3))
+                        outputs|=1u<<parameter.SemanticIndex;
+                }
+                emissionDiagnostic=(outputs&0xbu)==0xbu;
+            }
+        }
+    }
     // ISGN entries are 24 bytes. Reject newer signatures until independently tested.
     auto& signature=Find(chunks,Tag('I','S','G','N')).words;
     Require(signature.size()>=2 && signature[0]<32 && 2+signature[0]*6<=signature.size(),"unsupported input signature");
@@ -256,7 +280,63 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
     static const auto world40=Compile(worldSource,"ps_4_0");
     static const auto world41=Compile(worldSource,"ps_4_1");
     static const auto world50=Compile(worldSource,"ps_5_0");
-    auto helper=useAnimatedWorldPosition
+    auto diagnosticSource=[](std::string source,bool emission) {
+        auto replace=[&](const char* before,const char* after) {
+            size_t at=source.find(before);
+            Require(at!=std::string::npos,"diagnostic helper source changed");
+            source.replace(at,strlen(before),after);
+        };
+        if(emission) replace("void main(",
+            "struct DebugOutput { float4 diffuse:SV_Target0; float4 specular:SV_Target1; float4 emission:SV_Target3; };\n"
+            "DebugOutput main(");
+        else {
+            replace("void main(","float4 main(");
+            replace("uint primitive:SV_PrimitiveID) {","uint primitive:SV_PrimitiveID) : SV_Target0 {");
+        }
+        const char* colors=
+            "    float4 result=float4(0.05,0.2,1,1);\n"
+            "    result=wallHit?float4(0,1,1,1):result;\n"
+            "    result=spanRejected?float4(1,0.9,0,1):result;\n"
+            "    result=hide?float4(1,0.05,0.05,1):result;\n"
+            "    result=(selection==0 || (selection==2 && !branchPixel))?float4(0.7,0,0.8,1):result;\n";
+        if(emission) replace("    clip(hide?-1:1);",
+            (std::string(colors)+
+             "    DebugOutput output;\n"
+             "    output.diffuse=float4(0,0,0,1);\n"
+             "    output.specular=float4(0,0,0,0);\n"
+             "    output.emission=result;\n"
+             "    return output;").c_str());
+        else replace("    clip(hide?-1:1);",(std::string(colors)+"    return result;").c_str());
+        return source;
+    };
+    ComPtr<ID3DBlob> helper;
+    if(visualDiagnostic) {
+        if(emissionDiagnostic) {
+            static const auto emissionScreen=diagnosticSource(Helper,true);
+            static const auto emissionWorld=diagnosticSource(worldSource,true);
+            static const auto screen40=Compile(emissionScreen,"ps_4_0");
+            static const auto screen41=Compile(emissionScreen,"ps_4_1");
+            static const auto screen50=Compile(emissionScreen,"ps_5_0");
+            static const auto world40=Compile(emissionWorld,"ps_4_0");
+            static const auto world41=Compile(emissionWorld,"ps_4_1");
+            static const auto world50=Compile(emissionWorld,"ps_5_0");
+            helper=useAnimatedWorldPosition
+                ?(version==0x40?world40:version==0x41?world41:world50)
+                :(version==0x40?screen40:version==0x41?screen41:screen50);
+        } else {
+            static const auto diagnosticScreen=diagnosticSource(Helper,false);
+            static const auto diagnosticWorld=diagnosticSource(worldSource,false);
+            static const auto screen40=Compile(diagnosticScreen,"ps_4_0");
+            static const auto screen41=Compile(diagnosticScreen,"ps_4_1");
+            static const auto screen50=Compile(diagnosticScreen,"ps_5_0");
+            static const auto world40=Compile(diagnosticWorld,"ps_4_0");
+            static const auto world41=Compile(diagnosticWorld,"ps_4_1");
+            static const auto world50=Compile(diagnosticWorld,"ps_5_0");
+            helper=useAnimatedWorldPosition
+                ?(version==0x40?world40:version==0x41?world41:world50)
+                :(version==0x40?screen40:version==0x41?screen41:screen50);
+        }
+    } else helper=useAnimatedWorldPosition
         ?(version==0x40?world40:version==0x41?world41:world50)
         :(version==0x40?helper40:version==0x41?helper41:helper50);
     auto helperChunks=Read(helper->GetBufferPointer(),helper->GetBufferSize());
@@ -321,11 +401,25 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
             Relocate(in,originalTemps,inputs); append(in);
         }
     }
+    std::vector<Instruction> relocatedBody;
     for(auto in:extra) {
         if(Declaration(in.Op()) || in.Op()==D3D10_SB_OPCODE_RET) continue;
-        Relocate(in,originalTemps,inputs); append(in);
+        Relocate(in,originalTemps,inputs);
+        if(visualDiagnostic) relocatedBody.push_back(std::move(in));
+        else append(in);
     }
-    for(size_t i=body;i<original.size();++i) append(original[i]);
+    bool diagnosticReturn=false;
+    for(size_t i=body;i<original.size();++i) {
+        if(visualDiagnostic) {
+            Require(original[i].Op()!=D3D10_SB_OPCODE_RETC,"conditional return unsupported by visual diagnostic");
+            if(original[i].Op()==D3D10_SB_OPCODE_RET) {
+                for(const auto& in:relocatedBody) append(in);
+                diagnosticReturn=true;
+            }
+        }
+        append(original[i]);
+    }
+    if(visualDiagnostic) Require(diagnosticReturn,"visual diagnostic requires a pixel shader return");
     result[1]=unsigned(result.size()); Program(chunks).words=std::move(result);
     // Reflection/statistics describe the old body. The executable declarations and
     // signatures are authoritative; don't ship stale reflection alongside them.

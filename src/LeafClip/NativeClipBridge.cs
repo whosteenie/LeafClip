@@ -14,6 +14,7 @@ namespace LeafClip
         private static extern IntPtr GetProcAddress(IntPtr module, string name);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int InitializeDelegate(IntPtr resource);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int Initialize12Delegate(IntPtr resource);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int VisualDiagnostic12Delegate(int enabled);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int Enable12Delegate(int enabled);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int FallbackCamera12Delegate([In] float[] backbufferInverse, [In] float[] textureInverse, int width, int height);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int VersionDelegate();
@@ -30,6 +31,7 @@ namespace LeafClip
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void ShutdownDelegate();
         internal readonly InitializeDelegate Initialize;
         internal readonly Initialize12Delegate Initialize12;
+        internal readonly VisualDiagnostic12Delegate SetVisualDiagnostic12;
         internal readonly Enable12Delegate Enable12;
         internal readonly FallbackCamera12Delegate SetFallbackCamera12;
         internal readonly RegisterDelegate Register;
@@ -51,10 +53,11 @@ namespace LeafClip
             // Search only the DLL's own directory and System32 for dependencies.
             IntPtr module = LoadLibraryEx(path, IntPtr.Zero, 0x100 | 0x800);
             if (module == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (Bind<VersionDelegate>(module, "LC_GetApiVersion")() != 8)
+            if (Bind<VersionDelegate>(module, "LC_GetApiVersion")() != 9)
                 throw new InvalidOperationException("LeafClip.Native.dll has an incompatible API version.");
             Initialize = Bind<InitializeDelegate>(module, "LC_Initialize");
             Initialize12 = Bind<Initialize12Delegate>(module, "LC_Initialize12");
+            SetVisualDiagnostic12 = Bind<VisualDiagnostic12Delegate>(module, "LC_SetVisualDiagnostic12");
             Enable12 = Bind<Enable12Delegate>(module, "LC_Enable12");
             SetFallbackCamera12 = Bind<FallbackCamera12Delegate>(module, "LC_SetFallbackCamera12");
             Register = Bind<RegisterDelegate>(module, "LC_Register");

@@ -201,6 +201,7 @@ SetTopology12 originalSetTopology12=nullptr;
 Execute12 originalExecute12=nullptr;
 std::atomic<bool> probing12{false};
 std::atomic<bool> clipping12{false};
+bool visualDiagnostic12=false; // selected once, before D3D12 initialization
 std::atomic<uint64_t> stats12[29]{}; // first 14 counters retain their ABI positions; later counters diagnose unmodified private draws
 using CreatePS=HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11PixelShader**);
 using DrawIndexed=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
@@ -385,19 +386,21 @@ void PreparePipelines12() {
         ComPtr<ID3D12PipelineState> clipped;
         std::string error;
         bool animatedWorldPosition=false;
+        bool visualDiagnostic=false;
         try {
             auto pixel=job->copy->PixelShader();
+            auto original=job->copy->Describe(job->root->original.Get());
+            visualDiagnostic=visualDiagnostic12 && original.NumRenderTargets!=0;
             static std::atomic<unsigned> inspected{0};
             if(inspected.fetch_add(1)<4) {
-                auto original=job->copy->Describe(job->root->original.Get());
                 LogShaderInterface12("VS",original.VS);
                 LogShaderInterface12("PS",pixel);
             }
             std::vector<uint8_t> patched;
-            try {patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength,true);animatedWorldPosition=true;}
+            try {patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength,true,visualDiagnostic);animatedWorldPosition=true;}
             catch(const std::exception& ex) {
                 Log(std::string("D3D12 animated-position varying unavailable: ")+ex.what());
-                patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength);
+                patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength,false,visualDiagnostic);
             }
             auto desc=job->copy->Describe(job->root->extended.Get(),patched.data(),patched.size());
             Check(originalPSO12(device12.Get(),&desc,IID_PPV_ARGS(&clipped)),"create D3D12 clipped pipeline");
@@ -409,7 +412,7 @@ void PreparePipelines12() {
             job->animatedWorldPosition=animatedWorldPosition;
         }
         if(failed){++stats12[9];Log("D3D12 original pipeline retained: "+error);}
-        else {++stats12[8];Log("D3D12 clipped pipeline prepared.");}
+        else {++stats12[8];Log(visualDiagnostic?"D3D12 visual diagnostic pipeline prepared.":"D3D12 clipped pipeline prepared.");}
     }
 }
 void DrainCompleted12() {
@@ -635,6 +638,9 @@ bool TryClipDraw12(ID3D12GraphicsCommandList* list,UINT indices,UINT instances,
         pipeline=psos->second;root=roots->second;
         const bool colorPipeline=pipeline->copy->Describe(nullptr,nullptr,0).NumRenderTargets!=0;
         colorDraw=colorPipeline;
+        // Keep the original depth draw so diagnostic red pixels remain visible
+        // when the color pass shows what normal clipping would discard.
+        if(visualDiagnostic12 && !colorPipeline) return false;
         // Main-camera depth must be clipped too. Shadow-map passes have a
         // different viewport aspect in Valheim and cannot use the camera VP.
         if(!inScope){
@@ -882,7 +888,12 @@ void __stdcall RenderEvent(int id) {
     }
 }
 }
-int LC_GetApiVersion() {return 8;}
+int LC_GetApiVersion() {return 9;}
+int LC_SetVisualDiagnostic12(int enabled) {
+    if(probing12 || device12 || device)return 0;
+    visualDiagnostic12=enabled!=0;
+    return 1;
+}
 int LC_Enable12(int enabled) {
     if(!probing12)return 0;
     clipping12=enabled!=0;

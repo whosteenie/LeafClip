@@ -1,20 +1,22 @@
 param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release')
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$nativeBuild = 'artifacts/native'
+$package = 'artifacts/package/BepInEx/plugins/LeafClip'
 Push-Location $repoRoot
 try {
-    cmake -S native -B artifacts/native -G 'Visual Studio 17 2022' -A x64
+    cmake -S native -B $nativeBuild -G 'Visual Studio 17 2022' -A x64
     if ($LASTEXITCODE -ne 0) { throw 'Native configure failed' }
-    cmake --build artifacts/native --config $Configuration
+    cmake --build $nativeBuild --config $Configuration
     if ($LASTEXITCODE -ne 0) { throw 'Native build failed' }
-    ctest --test-dir artifacts/native -C $Configuration --output-on-failure
+    ctest --test-dir $nativeBuild -C $Configuration --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw 'Native renderer tests failed' }
     dotnet build src/LeafClip/LeafClip.csproj -c $Configuration
     if ($LASTEXITCODE -ne 0) { throw 'Managed build failed' }
-    $stage = Join-Path $repoRoot 'artifacts/package/BepInEx/plugins/LeafClip'
+    $stage = Join-Path $repoRoot $package
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item -LiteralPath "src/LeafClip/bin/$Configuration/net472/LeafClip.dll" -Destination $stage
-    Copy-Item -LiteralPath "artifacts/native/$Configuration/LeafClip.Native.dll" -Destination $stage
+    Copy-Item -LiteralPath "$nativeBuild/$Configuration/LeafClip.Native.dll" -Destination $stage
     Copy-Item -LiteralPath 'native/README.md' -Destination (Join-Path $stage 'README.md')
     $licenses = Join-Path $stage 'licenses'
     New-Item -ItemType Directory -Force $licenses | Out-Null

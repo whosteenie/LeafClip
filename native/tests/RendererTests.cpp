@@ -141,6 +141,75 @@ int main(int argc,char** argv) {
     int result=0;
     try {
         Harness h;RejectTests();size_t removed=0;
+        auto diagnosticCode=Compile("float4 main(float4 p:SV_Position,float2 uv:TEXCOORD0):SV_Target {clip(frac(uv.x*9)-0.3);return float4(uv,p.z,1);}","ps_4_0");
+        auto diagnosticBytes=PatchPixelShader(diagnosticCode->GetBufferPointer(),diagnosticCode->GetBufferSize(),false,true);
+        ComPtr<ID3D11PixelShader> diagnosticShader;
+        Check(h.device->CreatePixelShader(diagnosticBytes.data(),diagnosticBytes.size(),nullptr,&diagnosticShader),"visual diagnostic shader");
+        h.SetFrame(0,0);
+        Image diagnosticOriginal=h.Draw(h.original.Get());
+        Image diagnosticNormal=h.Draw(h.patched.Get());
+        size_t normalRemoved=0;
+        for(size_t i=0;i<diagnosticOriginal.pixels.size();++i)
+            if(diagnosticOriginal.pixels[i].a>0 && diagnosticNormal.pixels[i].a==0)++normalRemoved;
+        Image diagnosticImage=h.Draw(diagnosticShader.Get());
+        size_t red=0,blue=0;
+        for(size_t i=0;i<diagnosticImage.pixels.size();++i) {
+            const Pixel& pixel=diagnosticImage.pixels[i];
+            if(pixel.r>.9f && pixel.g<.1f && pixel.b<.1f)++red;
+            if(pixel.b>.9f && pixel.r<.1f && pixel.g<.3f)++blue;
+            if(diagnosticOriginal.pixels[i].a>0 && diagnosticNormal.pixels[i].a==0)
+                Require(pixel.r>.9f && pixel.g<.1f && pixel.b<.1f,
+                    "diagnostic failed to mark a normally hidden pixel red");
+        }
+        Require(red>20 && blue>20,"visual diagnostic did not mark both accepted and missed pixels: red="+
+            std::to_string(red)+" blue="+std::to_string(blue)+" normalRemoved="+std::to_string(normalRemoved));
+        auto mrtCode=Compile(R"(
+            struct GBuffer {float4 diffuse:SV_Target0;float4 specular:SV_Target1;
+                            float4 normal:SV_Target2;float4 emission:SV_Target3;};
+            GBuffer main(float4 p:SV_Position,float2 uv:TEXCOORD0) {
+                clip(frac(uv.x*9)-0.3);
+                GBuffer result;
+                result.diffuse=float4(uv,p.z,1);result.specular=0;
+                result.normal=0;result.emission=0;
+                return result;
+            })","ps_5_0");
+        auto mrtBytes=PatchPixelShader(mrtCode->GetBufferPointer(),mrtCode->GetBufferSize(),false,true);
+        ComPtr<ID3D11PixelShader> mrtShader;
+        Check(h.device->CreatePixelShader(mrtBytes.data(),mrtBytes.size(),nullptr,&mrtShader),
+            "deferred visual diagnostic shader");
+        D3D11_TEXTURE2D_DESC mrtDesc{};h.color->GetDesc(&mrtDesc);
+        std::array<ComPtr<ID3D11Texture2D>,3> mrtColors;
+        std::array<ComPtr<ID3D11RenderTargetView>,3> mrtViews;
+        ID3D11RenderTargetView* targets[4]={h.rtv.Get(),nullptr,nullptr,nullptr};
+        for(unsigned i=0;i<3;++i) {
+            Check(h.device->CreateTexture2D(&mrtDesc,nullptr,&mrtColors[i]),"diagnostic MRT color");
+            Check(h.device->CreateRenderTargetView(mrtColors[i].Get(),nullptr,&mrtViews[i]),"diagnostic MRT view");
+            targets[i+1]=mrtViews[i].Get();
+        }
+        h.context->OMSetRenderTargets(4,targets,h.dsv.Get());
+        float clear[4]={0,0,0,0};
+        h.context->ClearRenderTargetView(mrtViews[2].Get(),clear);
+        Image diffuseImage=h.Draw(mrtShader.Get());
+        h.context->CopyResource(h.colorRead.Get(),mrtColors[2].Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        Check(h.context->Map(h.colorRead.Get(),0,D3D11_MAP_READ,0,&mapped),"read diagnostic emission");
+        size_t emissionRed=0,emissionBlue=0,diffuseBright=0;
+        for(UINT y=0;y<Harness::Size;++y) {
+            auto row=reinterpret_cast<const Pixel*>(static_cast<const char*>(mapped.pData)+y*mapped.RowPitch);
+            for(UINT x=0;x<Harness::Size;++x) {
+                const Pixel& pixel=row[x];
+                if(pixel.r>.9f && pixel.g<.1f && pixel.b<.1f)++emissionRed;
+                if(pixel.b>.9f && pixel.r<.1f && pixel.g<.3f)++emissionBlue;
+                const Pixel& diffuse=diffuseImage.pixels[y*Harness::Size+x];
+                if(diffuse.r>.01f || diffuse.g>.01f || diffuse.b>.01f)++diffuseBright;
+            }
+        }
+        h.context->Unmap(h.colorRead.Get(),0);
+        auto normalTarget=h.rtv.Get();h.context->OMSetRenderTargets(1,&normalTarget,h.dsv.Get());
+        Require(emissionRed>20 && emissionBlue>20 && diffuseBright==0,
+            "deferred diagnostic did not write full-color emission with black diffuse: red="+
+            std::to_string(emissionRed)+" blue="+std::to_string(emissionBlue)+
+            " diffuse="+std::to_string(diffuseBright));
         auto worldCode=Compile(R"(
             float4 main(float4 p:SV_Position,float4 x:TEXCOORD1,float4 y:TEXCOORD2,
                         float4 z:TEXCOORD3):SV_Target {

@@ -20,6 +20,8 @@ Install both staged DLLs together, launch with Direct3D 11, then approach a tree
 
 For D3D12, install the same staged DLL pair, launch on D3D12, and load a world with a tree intersecting a player-built wall or roof. The log should say `D3D12 clipping active`. Check for `GpuClip target` and increasing `matchedPrivateDraws`, `preparedPSOs`, `clippedDraws` and `retiredDraws`. Inspect the wind-animated edge and record FPS when facing and looking away from a dense tree/building scene.
 
+To inspect a specific clipping failure, set `Diagnostics.VisualizeClipping = true` in the BepInEx config file and restart Valheim on D3D12. The same DLL pair then shows normally hidden tree pixels and colors each targeted pixel by the decision: red means it would be hidden, yellow means a wall was hit but the endpoint-span check rejected the cut, blue means no wall intersection, purple means the triangle or branch pixel was excluded, and cyan means another rule kept it. Unchanged green means the draw did not reach the diagnostic shader. Colors use the deferred emission target where available so scene lighting does not darken them, although tone mapping may shift their appearance. Set the option back to `false` and restart for normal clipping. The mode is D3D12-only and does not alter world data.
+
 ## Remaining work
 
 - Main-camera depth and depth-normals events are scoped, but depth draws without a patchable pixel shader, shadow maps and reflections can disagree with clipped color and still create artifacts. Their actual Valheim draw paths and projection conventions require runtime validation.
