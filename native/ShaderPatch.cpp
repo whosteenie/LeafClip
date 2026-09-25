@@ -128,7 +128,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
     bool hide=false;
     uint selection=eligible[triangleBase+primitive];
     bool branchPixel=selection==2 && length(p.xz-tree.xz)>=tree.w;
-    if(enabled!=0 && (selection==1 || branchPixel)) {
+    if(enabled!=0 && (selection==1 || branchPixel || selection==3)) {
         if(reserved!=0) {
             float3 direction=p-start;
             uint node=0;
@@ -143,6 +143,9 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                 if(!hit) {node=packedLow.w;continue;}
                 ++node;
                 if(payload==0xffffffffu) continue;
+                // Upper trunk is only clipped by upright building surfaces.
+                // A floor slab must not erase the trunk rising through it.
+                if(selection==3 && (payload & 0x80000000u)!=0 && boundsHigh.y-boundsLow.y<=0.5) continue;
                 uint offset=(payload & 0x7fffffffu)*3;
                 float4 v0=primitives[offset],v1=primitives[offset+1],v2=primitives[offset+2];
                 if((payload & 0x80000000u)!=0) {
@@ -163,10 +166,11 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                         float t=dot(e2,r)/determinant;
                         hide=u>=0 && v>=0 && u+v<=1 && t>=0 && t<=1;
                         if(hide) {
+                            float3 normal=abs(cross(e1,e2));
+                            if(selection==3 && normal.y>=max(normal.x,normal.z)) {hide=false;continue;}
                             // Use the whole building piece's horizontal span.
                             // A per-triangle span makes a tessellated wall open
                             // seams as foliage sways across internal edges.
-                            float3 normal=abs(cross(e1,e2));
                             float margin=0.06;
                             if(normal.x>=normal.y && normal.x>=normal.z)
                                 hide=p.z>=v0.w-margin && p.z<=v1.w+margin;
@@ -176,7 +180,7 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                     }
                 }
             }
-        } else [loop] for(uint i=0;i<min(boxCount,64u);++i) {
+        } else if(selection!=3) [loop] for(uint i=0;i<min(boxCount,64u);++i) {
             float3 a=float3(dot(inverseBoxes[i*3],float4(start,1)),dot(inverseBoxes[i*3+1],float4(start,1)),dot(inverseBoxes[i*3+2],float4(start,1)));
             float3 d=float3(dot(inverseBoxes[i*3],float4(p-start,0)),dot(inverseBoxes[i*3+1],float4(p-start,0)),dot(inverseBoxes[i*3+2],float4(p-start,0)));
             float low=0,high=1;

@@ -28,6 +28,7 @@ namespace LeafClip
             internal readonly List<MeshEntry> Meshes = new List<MeshEntry>();
             internal readonly List<Collider> Colliders = new List<Collider>();
             internal int BranchTriangles;
+            internal int TrunkTriangles;
             internal bool Dirty = true;
             internal int Signature;
             internal bool HasSignature;
@@ -219,7 +220,7 @@ namespace LeafClip
                         return;
                     }
                     active.Add(entry);
-                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}, branchTriangles={entry.BranchTriangles}. Original vertex data and triangle topology retained.");
+                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}, branchTriangles={entry.BranchTriangles}, upperTrunkTriangles={entry.TrunkTriangles}. Original vertex data and triangle topology retained.");
                 }
                 catch (Exception ex) { if (entry != null) Restore(entry); unsupported.Add(tree.GetInstanceID()); plugin.LogClip("GpuClip target failed: " + ex.Message); }
         }
@@ -242,9 +243,10 @@ namespace LeafClip
                 if (hit && StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) return true;
             return false;
         }
-        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer, out int branchTriangles, out float branchRadius)
+        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer, out int branchTriangles, out int trunkTriangles, out float branchRadius)
         {
             branchTriangles = 0;
+            trunkTriangles = 0;
             branchRadius = 0f;
             // Materials are part of classification; the same mesh with different
             // materials must not reuse another renderer's material classification.
@@ -267,7 +269,7 @@ namespace LeafClip
             }
             if (selected)
             {
-                branchTriangles = TopologyFoliage.MarkBranches(mesh, materials, mask, out branchRadius);
+                branchTriangles = TopologyFoliage.MarkBark(mesh, materials, mask, out branchRadius, out trunkTriangles);
                 return mask;
             }
             if (mesh.subMeshCount != 1 || materials.Length != 1 || !materials[0] || !materials[0].shader ||
@@ -302,8 +304,9 @@ namespace LeafClip
                     bool triangles = true;
                     for (int i = 0; i < source.subMeshCount; i++) triangles &= source.GetTopology(i) == MeshTopology.Triangles;
                     if (!triangles) continue;
-                    uint[] mask = Eligibility(source, renderer, out int branches, out float branchRadius); if (mask == null) continue;
+                    uint[] mask = Eligibility(source, renderer, out int branches, out int trunk, out float branchRadius); if (mask == null) continue;
                     result.BranchTriangles += branches;
+                    result.TrunkTriangles += trunk;
                     Vector3[] vertices = source.vertices;
                     for (int slot = 0; slot < source.subMeshCount; slot++)
                     {

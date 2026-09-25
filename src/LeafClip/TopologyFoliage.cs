@@ -9,9 +9,10 @@ namespace LeafClip
     // eligible for per-triangle clipping. No prefab or species name is involved.
     internal static class TopologyFoliage
     {
-        internal static int MarkBranches(Mesh mesh, Material[] materials, uint[] mask, out float branchRadius)
+        internal static int MarkBark(Mesh mesh, Material[] materials, uint[] mask, out float branchRadius, out int trunkTriangles)
         {
             branchRadius = 0f;
+            trunkTriangles = 0;
             Vector3[] vertices = mesh.vertices;
             var bark = new List<int>();
             var barkSlots = new List<int>();
@@ -50,18 +51,29 @@ namespace LeafClip
                 for (int i = 0; i < indices.Length; i += 3)
                 {
                     bool reachesBranch = false;
+                    bool aboveBase = true;
                     for (int j = 0; j < 3; j++)
                     {
                         Vector3 vertex = vertices[indices[i + j]];
+                        if (vertex.y < low + height * 0.15f) aboveBase = false;
                         if (vertex.y >= low + height * 0.12f &&
                             Vector2.Distance(center, new Vector2(vertex.x, vertex.z)) >= branchRadius)
                             reachesBranch = true;
                     }
-                    if (!reachesBranch) continue;
-                    // The pixel shader uses the animated world position to keep
-                    // the central trunk even on triangles spanning this border.
-                    mask[(start + i) / 3] = 2;
-                    marked++;
+                    if (reachesBranch)
+                    {
+                        // The pixel shader uses the animated world position to
+                        // keep the central trunk on triangles spanning this border.
+                        mask[(start + i) / 3] = 2;
+                        marked++;
+                    }
+                    else if (aboveBase)
+                    {
+                        // Upper trunk uses its undeformed centerline as the ray
+                        // origin. The rooted lower section remains untouched.
+                        mask[(start + i) / 3] = 3;
+                        trunkTriangles++;
+                    }
                 }
             }
             return marked;

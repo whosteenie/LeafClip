@@ -262,6 +262,19 @@ int main(int argc,char** argv) {
             return x>=0 && std::abs(y)<=.35f && std::hypot(x+2,z)>=2.3f;
         });
         LC_Unregister(h.index.Get());
+        uint32_t upperTrunk[2]={3,3};
+        Require(LC_Register(h.index.Get(),upperTrunk,2,0)!=0,"register upper trunk mask");
+        geometry=LC_CreateGeometry(nullptr,0,surface,2);Require(geometry!=0,"build upper trunk wall");
+        Require(LC_BindGeometry(h.index.Get(),h.params.tree,geometry)!=0,"bind upper trunk wall");LC_ReleaseGeometry(geometry);
+        h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
+        h.Verify(before,h.Draw(h.original.Get()),true,
+            [](float x,float y,float z){return x>=0 && y>=-.35f && y<=.35f+.3f*z*2/(x+2) && z>=-1.015f && z<=1.015f;});
+        const float floorBox[]={1,0,0,0, 0,10,0,0, 0,0,1,0, -1,-.1f,-1, 1,.1f,1};
+        geometry=LC_CreateGeometry(floorBox,1,nullptr,0);Require(geometry!=0,"build floor-shaped slab");
+        Require(LC_BindGeometry(h.index.Get(),h.params.tree,geometry)!=0,"bind floor-shaped slab");LC_ReleaseGeometry(geometry);
+        h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
+        h.Verify(before,h.Draw(h.original.Get()),false);
+        LC_Unregister(h.index.Get());
         Require(LC_CreateGeometry(nullptr,1,nullptr,0)==0,"missing geometry input accepted");
         Require(LC_CreateGeometry(nullptr,131073,nullptr,0)==0,"geometry budget ignored");
         std::cout<<"257-box BVH and exact sloped mesh surface: 24 animated GPU frames passed; shared resource lifetime and all three SRV slots restored\n";
