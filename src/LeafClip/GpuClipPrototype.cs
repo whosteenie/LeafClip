@@ -24,8 +24,10 @@ namespace LeafClip
         {
             internal TreeBase Tree;
             internal Bounds Bounds;
+            internal readonly List<Bounds> InfluenceBands = new List<Bounds>();
             internal readonly List<MeshEntry> Meshes = new List<MeshEntry>();
             internal readonly List<Collider> Colliders = new List<Collider>();
+            internal int BranchTriangles;
             internal bool Dirty = true;
             internal int Signature;
             internal bool HasSignature;
@@ -44,6 +46,7 @@ namespace LeafClip
         private readonly Plugin plugin;
         private readonly ConfigEntry<float> distance, boundsPadding;
         private readonly HashSet<TreeBase> known = new HashSet<TreeBase>();
+        private readonly Dictionary<TreeBase, List<Bounds>> dormant = new Dictionary<TreeBase, List<Bounds>>();
         private readonly List<TreeEntry> active = new List<TreeEntry>();
         private readonly Queue<TreeBase> captures = new Queue<TreeBase>();
         private readonly Dictionary<Mesh, uint[]> masks = new Dictionary<Mesh, uint[]>();
@@ -89,7 +92,7 @@ namespace LeafClip
                     if (!probing12) throw new InvalidOperationException("D3D12 initialization failed; inspect native messages.");
                     initialized = native.Enable12(1) != 0;
                     if (!initialized) throw new InvalidOperationException("D3D12 clipping activation failed; inspect native messages.");
-                    plugin.LogClip("D3D12 clipping active using the vegetation shader's animated world position.");
+                    plugin.LogClip("D3D12 clipping active.");
                     return;
                 }
                 initialized = native.Initialize(marker.GetNativeTexturePtr()) != 0;
@@ -105,9 +108,29 @@ namespace LeafClip
         internal void Notify(Piece piece)
         {
             if (!Active || !StructuralPieces.Includes(piece)) return;
+            geometry.Invalidate(piece);
+            Collider[] colliders = piece.GetComponentsInChildren<Collider>();
+            var recheck = new List<TreeBase>();
+            foreach (var candidate in dormant)
+            {
+                foreach (Collider collider in colliders)
+                {
+                    if (!collider) continue;
+                    bool intersects = false;
+                    foreach (Bounds band in candidate.Value)
+                        if (band.Intersects(collider.bounds)) { intersects = true; break; }
+                    if (intersects) { recheck.Add(candidate.Key); break; }
+                }
+            }
+            foreach (TreeBase tree in recheck) dormant.Remove(tree);
             foreach (TreeEntry tree in active)
-                foreach (Collider collider in piece.GetComponentsInChildren<Collider>())
-                    if (collider && tree.Bounds.Intersects(collider.bounds)) { tree.Dirty = true; break; }
+                foreach (Collider collider in colliders)
+                    if (collider && IntersectsInfluence(tree, collider.bounds)) { tree.Dirty = true; break; }
+        }
+        private static bool IntersectsInfluence(TreeEntry tree, Bounds bounds)
+        {
+            foreach (Bounds band in tree.InfluenceBands) if (band.Intersects(bounds)) return true;
+            return false;
         }
         internal void Update()
         {
@@ -122,7 +145,7 @@ namespace LeafClip
             if (!Active) return;
             if (scene != ZNetScene.instance)
             {
-                RestoreAll(); captures.Clear(); known.Clear(); unsupported.Clear(); masks.Clear(); geometry.Clear(); scene = ZNetScene.instance;
+                RestoreAll(); captures.Clear(); known.Clear(); dormant.Clear(); unsupported.Clear(); masks.Clear(); geometry.Clear(); scene = ZNetScene.instance;
                 if (scene) foreach (TreeBase tree in UnityEngine.Object.FindObjectsByType<TreeBase>(FindObjectsInactive.Exclude, FindObjectsSortMode.None)) Register(tree);
                 nextSelection = 0f;
             }
@@ -135,11 +158,16 @@ namespace LeafClip
             for (int i = 0; i < 2 && captures.Count > 0; i++) CaptureNextTree();
             if (Time.realtimeSinceStartup >= nextGeometry)
             {
-                nextGeometry = Time.realtimeSinceStartup + 0.25f;
+                nextGeometry = Time.realtimeSinceStartup + 0.1f;
+                bool building = active.Exists(tree => tree.Pending != null && !tree.Pending.IsCompleted);
                 foreach (TreeEntry tree in active)
                 {
+                    if (!tree.Dirty && tree.Pending == null && tree.HasSignature) continue;
+                    if (tree.Pending != null && !tree.Pending.IsCompleted) continue;
+                    if (building && tree.Pending == null) continue;
                     try { UpdateBoxes(tree); }
                     catch (Exception ex) { plugin.LogClip("GpuClip obstruction update failed; retrying when geometry changes: " + ex.Message); ClearBoxes(tree); }
+                    break;
                 }
             }
             if (!probing12 && Time.realtimeSinceStartup >= nextReport)
@@ -153,9 +181,12 @@ namespace LeafClip
         {
             captures.Clear();
             known.RemoveWhere(tree => !tree);
+            var staleDormant = new List<TreeBase>();
+            foreach (var candidate in dormant) if (!candidate.Key) staleDormant.Add(candidate.Key);
+            foreach (TreeBase tree in staleDormant) dormant.Remove(tree);
             var candidates = new List<TreeBase>();
             foreach (TreeBase tree in known)
-                if (tree.gameObject.activeInHierarchy && !unsupported.Contains(tree.GetInstanceID()) &&
+                if (tree.gameObject.activeInHierarchy && !dormant.ContainsKey(tree) && !unsupported.Contains(tree.GetInstanceID()) &&
                     (tree.transform.position - Player.m_localPlayer.transform.position).sqrMagnitude <= distance.Value * distance.Value &&
                     HasStructureNearby(tree))
                     candidates.Add(tree);
@@ -181,10 +212,24 @@ namespace LeafClip
                 {
                     entry = Capture(tree);
                     if (entry.Meshes.Count == 0) { unsupported.Add(tree.GetInstanceID()); return; }
+                    if (!HasInfluencingStructure(entry))
+                    {
+                        dormant[tree] = new List<Bounds>(entry.InfluenceBands);
+                        Restore(entry);
+                        return;
+                    }
                     active.Add(entry);
-                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}. Original vertex data and triangle topology retained.");
+                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}, branchTriangles={entry.BranchTriangles}. Original vertex data and triangle topology retained.");
                 }
                 catch (Exception ex) { if (entry != null) Restore(entry); unsupported.Add(tree.GetInstanceID()); plugin.LogClip("GpuClip target failed: " + ex.Message); }
+        }
+        private static bool HasInfluencingStructure(TreeEntry entry)
+        {
+            int layers = LayerMask.GetMask("piece", "piece_nonsolid");
+            foreach (Bounds band in entry.InfluenceBands)
+                foreach (Collider hit in Physics.OverlapBox(band.center, band.extents, Quaternion.identity, layers, QueryTriggerInteraction.Ignore))
+                    if (hit && StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) return true;
+            return false;
         }
         private bool HasStructureNearby(TreeBase tree)
         {
@@ -197,8 +242,10 @@ namespace LeafClip
                 if (hit && StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) return true;
             return false;
         }
-        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer)
+        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer, out int branchTriangles, out float branchRadius)
         {
+            branchTriangles = 0;
+            branchRadius = 0f;
             // Materials are part of classification; the same mesh with different
             // materials must not reuse another renderer's material classification.
             var materials = renderer.sharedMaterials;
@@ -218,7 +265,11 @@ namespace LeafClip
                 for (int i = start / 3; i < (start + length) / 3; i++) mask[i] = 1;
                 selected = true;
             }
-            if (selected) return mask;
+            if (selected)
+            {
+                branchTriangles = TopologyFoliage.MarkBranches(mesh, materials, mask, out branchRadius);
+                return mask;
+            }
             if (mesh.subMeshCount != 1 || materials.Length != 1 || !materials[0] || !materials[0].shader ||
                 materials[0].shader.name.IndexOf("Vegetation", StringComparison.OrdinalIgnoreCase) < 0) return null;
             if (!masks.TryGetValue(mesh, out mask))
@@ -235,6 +286,8 @@ namespace LeafClip
         private TreeEntry Capture(TreeBase tree)
         {
             var result = new TreeEntry { Tree = tree, Bounds = new Bounds(tree.transform.position, Vector3.zero) };
+            bool hasInfluenceBounds = false;
+            var influenceVertices = new List<Vector3>();
             try
             {
                 foreach (MeshRenderer renderer in tree.GetComponentsInChildren<MeshRenderer>(true))
@@ -249,7 +302,25 @@ namespace LeafClip
                     bool triangles = true;
                     for (int i = 0; i < source.subMeshCount; i++) triangles &= source.GetTopology(i) == MeshTopology.Triangles;
                     if (!triangles) continue;
-                    uint[] mask = Eligibility(source, renderer); if (mask == null) continue;
+                    uint[] mask = Eligibility(source, renderer, out int branches, out float branchRadius); if (mask == null) continue;
+                    result.BranchTriangles += branches;
+                    Vector3[] vertices = source.vertices;
+                    for (int slot = 0; slot < source.subMeshCount; slot++)
+                    {
+                        int start = checked((int)source.GetIndexStart(slot));
+                        int[] indices = source.GetIndices(slot);
+                        for (int i = 0; i < indices.Length; i += 3)
+                        {
+                            if (mask[(start + i) / 3] == 0) continue;
+                            for (int j = 0; j < 3; j++)
+                            {
+                                Vector3 point = renderer.transform.TransformPoint(vertices[indices[i + j]]);
+                                influenceVertices.Add(point);
+                                if (!hasInfluenceBounds) { result.Bounds = new Bounds(point, Vector3.zero); hasInfluenceBounds = true; }
+                                else result.Bounds.Encapsulate(point);
+                            }
+                        }
+                    }
                     var entry = new MeshEntry { Filter = meshFilter, Renderer = renderer, Original = source, OriginalMaterials = renderer.sharedMaterials };
                     result.Meshes.Add(entry);
                     entry.Private = UnityEngine.Object.Instantiate(source);
@@ -269,13 +340,39 @@ namespace LeafClip
                     }
                     entry.Private.UploadMeshData(false);
                     entry.Buffer = entry.Private.GetNativeIndexBufferPtr();
-                    if (native.Register(entry.Buffer, mask, mask.Length) == 0) throw new InvalidOperationException("native mesh registration failed");
+                    Vector3 worldScale = renderer.transform.lossyScale;
+                    float worldBranchRadius = branchRadius * Mathf.Max(Mathf.Abs(worldScale.x), Mathf.Abs(worldScale.z));
+                    if (native.Register(entry.Buffer, mask, mask.Length, worldBranchRadius) == 0) throw new InvalidOperationException("native mesh registration failed");
                     meshFilter.sharedMesh = entry.Private;
                     renderer.sharedMaterials = entry.PrivateMaterials;
-                    for (int i = 0; i < 8; i++) result.Bounds.Encapsulate(renderer.transform.TransformPoint(bounds.center + new Vector3(
-                        (i & 1) == 0 ? -bounds.extents.x : bounds.extents.x,
-                        (i & 2) == 0 ? -bounds.extents.y : bounds.extents.y,
-                        (i & 4) == 0 ? -bounds.extents.z : bounds.extents.z)));
+                }
+                if (hasInfluenceBounds)
+                {
+                    const int bandCount = 8;
+                    var bands = new Bounds[bandCount];
+                    var used = new bool[bandCount];
+                    float bottom = result.Bounds.min.y;
+                    float step = Mathf.Max(0.001f, result.Bounds.size.y / bandCount);
+                    for (int i = 0; i < influenceVertices.Count; i += 3)
+                    {
+                        Vector3 a = influenceVertices[i], b = influenceVertices[i + 1], c = influenceVertices[i + 2];
+                        float low = Mathf.Min(a.y, Mathf.Min(b.y, c.y));
+                        float high = Mathf.Max(a.y, Mathf.Max(b.y, c.y));
+                        int first = Mathf.Clamp(Mathf.FloorToInt((low - bottom) / step), 0, bandCount - 1);
+                        int last = Mathf.Clamp(Mathf.FloorToInt((high - bottom) / step), 0, bandCount - 1);
+                        for (int band = first; band <= last; band++)
+                        {
+                            if (!used[band])
+                            {
+                                bands[band] = new Bounds(new Vector3(tree.transform.position.x, bottom + (band + 0.5f) * step, tree.transform.position.z), Vector3.zero);
+                                used[band] = true;
+                            }
+                            bands[band].Encapsulate(a); bands[band].Encapsulate(b); bands[band].Encapsulate(c);
+                        }
+                    }
+                    for (int band = 0; band < bandCount; band++)
+                        if (used[band]) { bands[band].Expand(2f * boundsPadding.Value); result.InfluenceBands.Add(bands[band]); }
+                    result.Bounds.Expand(2f * boundsPadding.Value);
                 }
                 return result;
             }
@@ -284,12 +381,14 @@ namespace LeafClip
         private void UpdateBoxes(TreeEntry tree)
         {
             if (!tree.Tree) return;
+            if (!tree.Dirty && tree.Pending == null && tree.HasSignature) return;
             if (tree.Dirty)
             {
                 tree.Colliders.Clear();
                 int layers = LayerMask.GetMask("piece", "piece_nonsolid");
                 foreach (Collider hit in Physics.OverlapBox(tree.Bounds.center, tree.Bounds.extents, Quaternion.identity, layers, QueryTriggerInteraction.Ignore))
-                    if (hit && hit.enabled && StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) tree.Colliders.Add(hit);
+                    if (hit && hit.enabled && IntersectsInfluence(tree, hit.bounds) &&
+                        StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) tree.Colliders.Add(hit);
                 tree.Colliders.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
                 tree.Dirty = false; tree.HasSignature = false; tree.Revision++;
             }
@@ -331,13 +430,13 @@ namespace LeafClip
             // uncropped warmup is preferable to an obsolete cut after demolition.
             ClearBoxes(tree);
             tree.Signature = signature; tree.HasSignature = true;
-            geometry.Snapshot(tree.Colliders, out float[] boxes, out float[] triangles, out int visualPieces, out int fallbackPieces, out int skipped);
+            geometry.Snapshot(tree.Colliders, tree.Bounds, out float[] boxes, out float[] triangles, out int visualPieces, out int fallbackPieces, out int wallCandidates, out int joinedWalls, out int skipped);
             Vector3 origin = tree.Tree.transform.position;
             tree.PendingOrigin = new[] { origin.x, origin.y, origin.z };
             tree.PendingSignature = signature;
             tree.PendingRevision = tree.Revision;
-            tree.Pending = Task.Run(() => native.CreateGeometry(boxes, boxes.Length / 18, triangles, triangles.Length / 9));
-            plugin.LogClip($"GpuClip {tree.Tree.name}: {visualPieces} pieces use visible mesh surfaces, {fallbackPieces} use colliders; queued {boxes.Length / 18} boxes, {triangles.Length / 9} triangles, {skipped} unsupported colliders across {tree.Meshes.Count} LOD meshes.");
+            tree.Pending = Task.Run(() => native.CreateGeometry(boxes, boxes.Length / 18, triangles, triangles.Length / 11));
+            plugin.LogClip($"GpuClip {tree.Tree.name}: {visualPieces} pieces use visible mesh surfaces, {fallbackPieces} use colliders, {joinedWalls}/{wallCandidates} aligned wall joins/candidates; queued {boxes.Length / 18} boxes, {triangles.Length / 11} triangles, {skipped} unsupported colliders across {tree.Meshes.Count} LOD meshes.");
         }
         private void ClearBoxes(TreeEntry tree)
         {

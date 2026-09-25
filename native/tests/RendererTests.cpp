@@ -194,7 +194,7 @@ int main(int argc,char** argv) {
         uint32_t none[2]={0,0};h.context->UpdateSubresource(h.mask.Get(),0,nullptr,none,0,0);
         h.params.enabled=1;h.SetFrame(1,0);auto before=h.Draw(h.original.Get());h.Verify(before,h.Draw(h.patched.Get()),false);
         uint32_t all[2]={1,1};h.context->UpdateSubresource(h.mask.Get(),0,nullptr,all,0,0);
-        Require(LC_Register(h.index.Get(),all,2)!=0,"register test draw");
+        Require(LC_Register(h.index.Get(),all,2,0)!=0,"register test draw");
         Require(LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1)!=0,"set obstruction");
         auto event=reinterpret_cast<void(__stdcall*)(int)>(LC_GetRenderEvent());
         event(LC_QueueCamera(h.params.inverseViewProjection));
@@ -242,23 +242,31 @@ int main(int argc,char** argv) {
         // Two-sided sloped surface, y <= .35 + .3*z. This is a geometric edge,
         // not the surface's AABB: wind changes both its apparent height and depth.
         std::cout<<"Testing triangle hierarchy\n";
-        const float surface[]={0,-.35f,-1, 0,-.35f,1, 0,.65f,1,
-                               0,-.35f,-1, 0,.65f,1, 0,.05f,-1};
+        const float surface[]={0,-.35f,-1, 0,-.35f,1, 0,.65f,1, -1,1,
+                               0,-.35f,-1, 0,.65f,1, 0,.05f,-1, -1,1};
         geometry=LC_CreateGeometry(nullptr,0,surface,2);Require(geometry!=0,"build triangle hierarchy");
         Require(LC_BindGeometry(h.index.Get(),h.params.tree,geometry)!=0,"bind triangles");LC_ReleaseGeometry(geometry);
         for(int projection=0;projection<3;++projection)for(int frame=0;frame<4;++frame) {
             h.SetFrame(frame*1.7f,projection);event(0);auto reference=h.Draw(h.original.Get());
             event(LC_QueueCamera(h.params.inverseViewProjection));h.Verify(reference,h.Draw(h.original.Get()),true,
-                [](float x,float y,float z){return x>=0 && y>=-.35f && y<=.35f+.3f*z*2/(x+2);});
+                [](float x,float y,float z){return x>=0 && y>=-.35f && y<=.35f+.3f*z*2/(x+2) && z>=-1.015f && z<=1.015f;});
         }
         Require(LC_BindGeometry(h.index.Get(),h.params.tree,0)!=0,"clear hierarchy");
         h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
         h.Verify(before,h.Draw(h.original.Get()),false);
+        uint32_t branches[2]={2,2};
+        LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),branches,2,2.3f)!=0,"register branch mask");
+        Require(LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1)!=0,"bind branch test wall");
+        h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
+        h.Verify(before,h.Draw(h.original.Get()),true,[](float x,float y,float z){
+            return x>=0 && std::abs(y)<=.35f && std::hypot(x+2,z)>=2.3f;
+        });
+        LC_Unregister(h.index.Get());
         Require(LC_CreateGeometry(nullptr,1,nullptr,0)==0,"missing geometry input accepted");
         Require(LC_CreateGeometry(nullptr,131073,nullptr,0)==0,"geometry budget ignored");
         std::cout<<"257-box BVH and exact sloped mesh surface: 24 animated GPU frames passed; shared resource lifetime and all three SRV slots restored\n";
         // Primitive IDs restart per draw; StartIndexLocation must offset the mask.
-        uint32_t mixed[2]={1,0};LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),mixed,2)!=0,"register mixed mask");
+        uint32_t mixed[2]={1,0};LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),mixed,2,0)!=0,"register mixed mask");
         LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1);
         event(0);auto second=h.Draw(h.original.Get(),3,3);event(LC_QueueCamera(h.params.inverseViewProjection));h.Verify(second,h.Draw(h.original.Get(),3,3),false);
         event(0);h.Verify(before,h.Draw(h.original.Get()),false);

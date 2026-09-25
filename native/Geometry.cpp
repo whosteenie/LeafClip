@@ -26,12 +26,12 @@ GeometryData BuildGeometry(const float* boxes,unsigned boxCount,const float* tri
         items.push_back(item);
     }
     for(unsigned i=0;i<triangleCount;++i) {
-        const float* t=triangles+i*9;finite(t,9);Primitive item{};item.payload=uint32_t(result.primitives.size()/3);
+        const float* t=triangles+i*11;finite(t,11);Primitive item{};item.payload=uint32_t(result.primitives.size()/3);
         for(unsigned axis=0;axis<3;++axis) {
             item.low[axis]=std::min({t[axis],t[axis+3],t[axis+6]});
             item.high[axis]=std::max({t[axis],t[axis+3],t[axis+6]});
         }
-        for(unsigned v=0;v<3;++v)result.primitives.push_back({t[v*3],t[v*3+1],t[v*3+2],0});
+        for(unsigned v=0;v<3;++v)result.primitives.push_back({t[v*3],t[v*3+1],t[v*3+2],v==0?t[9]:v==1?t[10]:0});
         items.push_back(item);
     }
     if(items.empty())return result;

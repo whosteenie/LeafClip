@@ -9,6 +9,7 @@ struct GeometryData {
     std::vector<std::array<float,4>> nodes, primitives;
 };
 // Boxes: 12 inverse-transform floats followed by world AABB min/max (18 total).
-// Triangles: three world-space positions (9 floats). Inputs are copied.
+// Triangles: three world-space positions and the piece's lateral span
+// (11 floats). Inputs are copied.
 GeometryData BuildGeometry(const float* boxes, unsigned boxCount, const float* triangles, unsigned triangleCount);
 }

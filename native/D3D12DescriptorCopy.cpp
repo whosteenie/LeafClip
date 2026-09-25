@@ -10,7 +10,8 @@ void Check(HRESULT hr,const char* label) {
 }
 CopiedDescriptors12 CopyDescriptors12(ID3D12Device* device,ID3D12DescriptorHeap* source,
     const std::vector<DescriptorTable12>& tables,const RootArguments12& original,
-    const std::array<D3D12_CPU_DESCRIPTOR_HANDLE,4>& clip,unsigned cbvParameter,unsigned srvParameter) {
+    const std::array<D3D12_CPU_DESCRIPTOR_HANDLE,4>& clip,unsigned cbvParameter,unsigned srvParameter,
+    DescriptorHeapProvider12 acquire,void* acquireContext) {
     if(!device || cbvParameter>=64 || srvParameter>=64)throw std::runtime_error("invalid D3D12 descriptor copy arguments");
     constexpr auto type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     const unsigned stride=device->GetDescriptorHandleIncrementSize(type);
@@ -39,7 +40,13 @@ CopiedDescriptors12 CopyDescriptors12(ID3D12Device* device,ID3D12DescriptorHeap*
     D3D12_DESCRIPTOR_HEAP_DESC desc{};desc.Type=type;desc.NumDescriptors=total+4;
     desc.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     CopiedDescriptors12 result;result.arguments=original;
-    Check(device->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&result.heap)),"create D3D12 draw descriptor heap");
+    if(acquire)result.heap=acquire(desc.NumDescriptors,acquireContext);
+    if(result.heap) {
+        const auto reused=result.heap->GetDesc();
+        if(reused.Type!=type || reused.NumDescriptors<desc.NumDescriptors ||
+           !(reused.Flags&D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
+            throw std::runtime_error("recycled D3D12 descriptor heap is incompatible");
+    } else Check(device->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&result.heap)),"create D3D12 draw descriptor heap");
     auto targetCPU=result.heap->GetCPUDescriptorHandleForHeapStart();
     auto targetGPU=result.heap->GetGPUDescriptorHandleForHeapStart();
     for(const auto& item:copies) {

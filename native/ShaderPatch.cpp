@@ -126,7 +126,9 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
     float3 p=hp.xyz/hp.w;
     float3 start=float3(tree.x,p.y,tree.z);
     bool hide=false;
-    if(enabled!=0 && eligible[triangleBase+primitive]!=0) {
+    uint selection=eligible[triangleBase+primitive];
+    bool branchPixel=selection==2 && length(p.xz-tree.xz)>=tree.w;
+    if(enabled!=0 && (selection==1 || branchPixel)) {
         if(reserved!=0) {
             float3 direction=p-start;
             uint node=0;
@@ -160,6 +162,17 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                         float3 r=cross(s,e1);float v=dot(direction,r)/determinant;
                         float t=dot(e2,r)/determinant;
                         hide=u>=0 && v>=0 && u+v<=1 && t>=0 && t<=1;
+                        if(hide) {
+                            // Use the whole building piece's horizontal span.
+                            // A per-triangle span makes a tessellated wall open
+                            // seams as foliage sways across internal edges.
+                            float3 normal=abs(cross(e1,e2));
+                            float margin=0.06;
+                            if(normal.x>=normal.y && normal.x>=normal.z)
+                                hide=p.z>=v0.w-margin && p.z<=v1.w+margin;
+                            else if(normal.z>=normal.y)
+                                hide=p.x>=v0.w-margin && p.x<=v1.w+margin;
+                        }
                     }
                 }
             }

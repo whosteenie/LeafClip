@@ -17,7 +17,7 @@ namespace LeafClip
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int Enable12Delegate(int enabled);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int FallbackCamera12Delegate([In] float[] backbufferInverse, [In] float[] textureInverse, int width, int height);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int VersionDelegate();
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int RegisterDelegate(IntPtr buffer, [In] uint[] mask, int count);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int RegisterDelegate(IntPtr buffer, [In] uint[] mask, int count, float branchRadius);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void UnregisterDelegate(IntPtr buffer);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate int ObstructionsDelegate(IntPtr buffer, [In] float[] tree, [In] float[] boxes, int count);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate ulong CreateGeometryDelegate([In] float[] boxes, int boxCount, [In] float[] triangles, int triangleCount);
@@ -51,7 +51,7 @@ namespace LeafClip
             // Search only the DLL's own directory and System32 for dependencies.
             IntPtr module = LoadLibraryEx(path, IntPtr.Zero, 0x100 | 0x800);
             if (module == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (Bind<VersionDelegate>(module, "LC_GetApiVersion")() != 6)
+            if (Bind<VersionDelegate>(module, "LC_GetApiVersion")() != 8)
                 throw new InvalidOperationException("LeafClip.Native.dll has an incompatible API version.");
             Initialize = Bind<InitializeDelegate>(module, "LC_Initialize");
             Initialize12 = Bind<Initialize12Delegate>(module, "LC_Initialize12");

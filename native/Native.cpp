@@ -12,6 +12,7 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <atomic>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <condition_variable>
@@ -21,6 +22,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 #include <cstring>
 #include <stdexcept>
 extern "C" unsigned LC_D3D12GraphicsPSOSlot();
@@ -68,6 +70,7 @@ struct Pipeline12 {
     std::shared_ptr<OwnedGraphicsPSO12> copy;
     std::shared_ptr<Root12> root;
     bool queued=false,failed=false;
+    bool animatedWorldPosition=false;
 };
 struct Geometry12 {GeometryViews12 views;};
 struct Target12 {
@@ -77,14 +80,31 @@ struct Target12 {
     BufferView12 mask;
     std::shared_ptr<Geometry12> geometry;
     ClipConstants data{};
+    std::unordered_map<unsigned,std::shared_ptr<BufferView12>> constants;
     unsigned triangleCount=0;
 };
+std::mutex descriptorPoolMutex12;
+std::multimap<unsigned,ComPtr<ID3D12DescriptorHeap>> descriptorPool12;
+ComPtr<ID3D12DescriptorHeap> AcquireDescriptorHeap12(unsigned count,void*) {
+    std::lock_guard<std::mutex> lock(descriptorPoolMutex12);
+    auto found=descriptorPool12.lower_bound(count);
+    if(found==descriptorPool12.end())return {};
+    auto heap=std::move(found->second);
+    descriptorPool12.erase(found);
+    return heap;
+}
+void RecycleDescriptorHeap12(ComPtr<ID3D12DescriptorHeap> heap) {
+    if(!heap)return;
+    std::lock_guard<std::mutex> lock(descriptorPoolMutex12);
+    if(descriptorPool12.size()<2048)descriptorPool12.emplace(heap->GetDesc().NumDescriptors,std::move(heap));
+}
 struct DrawPacket12 {
-    BufferView12 constants;
+    std::shared_ptr<BufferView12> constants;
     CopiedDescriptors12 descriptors;
     std::shared_ptr<Target12> target;
     std::shared_ptr<Geometry12> geometry;
     std::shared_ptr<Pipeline12> pipeline;
+    ~DrawPacket12(){RecycleDescriptorHeap12(std::move(descriptors.heap));}
 };
 struct Queue12 {
     ComPtr<ID3D12CommandQueue> queue;
@@ -102,10 +122,29 @@ std::thread worker12;
 std::atomic<bool> runningWorker12{false};
 std::unordered_map<ID3D12Resource*,std::shared_ptr<Target12>> targets12;
 std::map<D3D12_GPU_VIRTUAL_ADDRESS,std::shared_ptr<Target12>> targetAddresses12;
+using RegisteredRange12=std::pair<D3D12_GPU_VIRTUAL_ADDRESS,D3D12_GPU_VIRTUAL_ADDRESS>;
+std::shared_ptr<const std::vector<RegisteredRange12>> registeredRanges12=std::make_shared<const std::vector<RegisteredRange12>>();
+std::atomic<uint64_t> registeredGeneration12{1};
+void PublishRegisteredRanges12() { // mutex12 held
+    auto ranges=std::make_shared<std::vector<RegisteredRange12>>();
+    ranges->reserve(targetAddresses12.size());
+    for(const auto& item:targetAddresses12)
+        ranges->emplace_back(item.first,item.first+item.second->bytes);
+    std::shared_ptr<const std::vector<RegisteredRange12>> immutable=ranges;
+    std::atomic_store_explicit(&registeredRanges12,std::move(immutable),std::memory_order_release);
+    registeredGeneration12.fetch_add(1,std::memory_order_release);
+}
+bool MayBeRegistered12(D3D12_GPU_VIRTUAL_ADDRESS address) {
+    auto ranges=std::atomic_load_explicit(&registeredRanges12,std::memory_order_acquire);
+    auto above=std::upper_bound(ranges->begin(),ranges->end(),address,
+        [](D3D12_GPU_VIRTUAL_ADDRESS value,const RegisteredRange12& range){return value<range.first;});
+    return above!=ranges->begin() && address<std::prev(above)->second;
+}
 std::unordered_map<uint64_t,std::shared_ptr<Geometry12>> geometries12;
 std::unordered_map<ID3D12CommandQueue*,std::shared_ptr<Queue12>> queues12;
 std::vector<std::shared_ptr<DrawPacket12>> orphanPackets12;
 struct DrawState12 {
+    std::mutex recordsMutex;
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12RootSignature> root;
@@ -115,6 +154,8 @@ struct DrawState12 {
     D3D12_VIEWPORT viewport{};
     D3D12_PRIMITIVE_TOPOLOGY topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
     bool hasIndex=false,hasViewport=false,complete=true,recordedSubmitted=false;
+    bool possiblePrivateIndex=false;
+    uint64_t registeredGeneration=0;
     std::vector<std::shared_ptr<DrawPacket12>> recorded;
 };
 std::unordered_map<ID3D12GraphicsCommandList*,std::shared_ptr<DrawState12>> drawStates12;
@@ -122,6 +163,19 @@ DrawState12& State12(ID3D12GraphicsCommandList* list) {
     auto& state=drawStates12[list];
     if(!state){state=std::make_shared<DrawState12>();state->list=list;}
     return *state;
+}
+// D3D12 command lists are recorded by one thread at a time. Keep the current
+// list's stable state pointer on that thread so the many root-argument setters
+// do not contend on the global registry lock for every call.
+DrawState12& RecordingState12(ID3D12GraphicsCommandList* list) {
+    thread_local ID3D12GraphicsCommandList* cachedList=nullptr;
+    thread_local DrawState12* cachedState=nullptr;
+    if(cachedList!=list) {
+        std::lock_guard<std::mutex> lock(mutex12);
+        cachedState=&State12(list);
+        cachedList=list;
+    }
+    return *cachedState;
 }
 uint64_t geometrySerial12=0;
 std::atomic<bool> scope12{false};
@@ -330,6 +384,7 @@ void PreparePipelines12() {
         }
         ComPtr<ID3D12PipelineState> clipped;
         std::string error;
+        bool animatedWorldPosition=false;
         try {
             auto pixel=job->copy->PixelShader();
             static std::atomic<unsigned> inspected{0};
@@ -339,7 +394,7 @@ void PreparePipelines12() {
                 LogShaderInterface12("PS",pixel);
             }
             std::vector<uint8_t> patched;
-            try {patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength,true);}
+            try {patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength,true);animatedWorldPosition=true;}
             catch(const std::exception& ex) {
                 Log(std::string("D3D12 animated-position varying unavailable: ")+ex.what());
                 patched=PatchPixelShader(pixel.pShaderBytecode,pixel.BytecodeLength);
@@ -351,6 +406,7 @@ void PreparePipelines12() {
         {
             std::lock_guard<std::mutex> lock(mutex12);
             job->clipped=std::move(clipped);job->failed=failed;
+            job->animatedWorldPosition=animatedWorldPosition;
         }
         if(failed){++stats12[9];Log("D3D12 original pipeline retained: "+error);}
         else {++stats12[8];Log("D3D12 clipped pipeline prepared.");}
@@ -384,6 +440,7 @@ void STDMETHODCALLTYPE CaptureExecute12(ID3D12CommandQueue* queue,UINT count,ID3
             auto list=reinterpret_cast<ID3D12GraphicsCommandList*>(lists[i]);
             auto draw=drawStates12.find(list);
             if(draw!=drawStates12.end()) {
+                std::lock_guard<std::mutex> records(draw->second->recordsMutex);
                 packets.insert(packets.end(),draw->second->recorded.begin(),draw->second->recorded.end());
                 draw->second->recordedSubmitted=true;
             }
@@ -410,18 +467,23 @@ void STDMETHODCALLTYPE CaptureExecute12(ID3D12CommandQueue* queue,UINT count,ID3
 HRESULT STDMETHODCALLTYPE CaptureReset12(ID3D12GraphicsCommandList* list,ID3D12CommandAllocator* allocator,ID3D12PipelineState* initial) {
     HRESULT hr=originalReset12(list,allocator,initial);
     if(probing12 && SUCCEEDED(hr) && !forwarding12) {
+        auto& s=RecordingState12(list);
         std::lock_guard<std::mutex> lock(mutex12);
-        auto& s=State12(list);
-        if(!s.recordedSubmitted)orphanPackets12.insert(orphanPackets12.end(),s.recorded.begin(),s.recorded.end());
-        s.recorded.clear();s.recordedSubmitted=false;
+        {
+            std::lock_guard<std::mutex> records(s.recordsMutex);
+            if(!s.recordedSubmitted)
+                orphanPackets12.insert(orphanPackets12.end(),s.recorded.begin(),s.recorded.end());
+            s.recorded.clear();s.recordedSubmitted=false;
+        }
         s.pipeline=initial;s.root.Reset();s.resources.Reset();s.samplers.Reset();
-        s.arguments.Clear();s.hasIndex=s.hasViewport=false;s.topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;s.complete=true;
+        s.arguments.Clear();s.hasIndex=s.hasViewport=false;s.possiblePrivateIndex=false;
+        s.topology=D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;s.complete=true;
     }
     return hr;
 }
 void STDMETHODCALLTYPE CaptureSetPipeline12(ID3D12GraphicsCommandList* list,ID3D12PipelineState* value) {
     originalSetPipeline12(list,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);State12(list).pipeline=value;}
+    if(probing12 && !forwarding12)RecordingState12(list).pipeline=value;
 }
 void STDMETHODCALLTYPE CaptureSetHeaps12(ID3D12GraphicsCommandList* list,UINT count,ID3D12DescriptorHeap* const* heaps) {
     originalSetHeaps12(list,count,heaps);
@@ -431,51 +493,57 @@ void STDMETHODCALLTYPE CaptureSetHeaps12(ID3D12GraphicsCommandList* list,UINT co
         if(heaps[i]->GetDesc().Type==D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)resources=heaps[i];
         if(heaps[i]->GetDesc().Type==D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)samplers=heaps[i];
     }
-    std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);
+    auto& s=RecordingState12(list);
     if(s.resources.Get()!=resources.Get() || s.samplers.Get()!=samplers.Get())s.arguments.ClearTables();
     s.resources=std::move(resources);s.samplers=std::move(samplers);
 }
 void STDMETHODCALLTYPE CaptureSetRoot12(ID3D12GraphicsCommandList* list,ID3D12RootSignature* value) {
     originalSetRoot12(list,value);
     if(!probing12 || forwarding12)return;
-    std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);
+    auto& s=RecordingState12(list);
     if(s.root.Get()!=value)s.arguments.Clear();s.root=value;
 }
 void STDMETHODCALLTYPE CaptureSetTable12(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_DESCRIPTOR_HANDLE value) {
     originalSetTable12(list,slot,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetTable(slot,value);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetTable(slot,value);}
 }
 void STDMETHODCALLTYPE CaptureSetConstant12(ID3D12GraphicsCommandList* list,UINT slot,UINT value,UINT offset) {
     originalSetConstant12(list,slot,value,offset);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetConstants(slot,offset,&value,1);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetConstants(slot,offset,&value,1);}
 }
 void STDMETHODCALLTYPE CaptureSetConstants12(ID3D12GraphicsCommandList* list,UINT slot,UINT count,const void* values,UINT offset) {
     originalSetConstants12(list,slot,count,values,offset);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetConstants(slot,offset,static_cast<const uint32_t*>(values),count);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetConstants(slot,offset,static_cast<const uint32_t*>(values),count);}
 }
 void STDMETHODCALLTYPE CaptureSetCBV12(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS value) {
     originalSetCBV12(list,slot,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetCBV(slot,value);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetCBV(slot,value);}
 }
 void STDMETHODCALLTYPE CaptureSetSRV12(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS value) {
     originalSetSRV12(list,slot,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetSRV(slot,value);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetSRV(slot,value);}
 }
 void STDMETHODCALLTYPE CaptureSetUAV12(ID3D12GraphicsCommandList* list,UINT slot,D3D12_GPU_VIRTUAL_ADDRESS value) {
     originalSetUAV12(list,slot,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.complete&=s.arguments.SetUAV(slot,value);}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.complete&=s.arguments.SetUAV(slot,value);}
 }
 void STDMETHODCALLTYPE CaptureSetIndex12(ID3D12GraphicsCommandList* list,const D3D12_INDEX_BUFFER_VIEW* value) {
     originalSetIndex12(list,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.hasIndex=value!=nullptr;if(value)s.index=*value;}
+    if(probing12 && !forwarding12){
+        auto& s=RecordingState12(list);
+        s.hasIndex=value!=nullptr;
+        s.registeredGeneration=registeredGeneration12.load(std::memory_order_acquire);
+        s.possiblePrivateIndex=value && MayBeRegistered12(value->BufferLocation);
+        if(value)s.index=*value;
+    }
 }
 void STDMETHODCALLTYPE CaptureSetViewports12(ID3D12GraphicsCommandList* list,UINT count,const D3D12_VIEWPORT* values) {
     originalSetViewports12(list,count,values);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);auto& s=State12(list);s.hasViewport=count==1 && values;if(s.hasViewport)s.viewport=*values;}
+    if(probing12 && !forwarding12){auto& s=RecordingState12(list);s.hasViewport=count==1 && values;if(s.hasViewport)s.viewport=*values;}
 }
 void STDMETHODCALLTYPE CaptureSetTopology12(ID3D12GraphicsCommandList* list,D3D12_PRIMITIVE_TOPOLOGY value) {
     originalSetTopology12(list,value);
-    if(probing12 && !forwarding12){std::lock_guard<std::mutex> lock(mutex12);State12(list).topology=value;}
+    if(probing12 && !forwarding12)RecordingState12(list).topology=value;
 }
 struct Snapshot12 {
     ComPtr<ID3D12PipelineState> pipeline;
@@ -592,27 +660,36 @@ bool TryClipDraw12(ID3D12GraphicsCommandList* list,UINT indices,UINT instances,
         data=target->data;
         data.triangleBase=UINT(start/3);
     }
-    {
+    data.enabled=1u;
+    auto packet=std::make_shared<DrawPacket12>();
+    packet->target=target;packet->geometry=geometry;packet->pipeline=pipeline;
+    if(pipeline->animatedWorldPosition) {
+        std::lock_guard<std::mutex> lock(mutex12);
+        if(target->geometry==geometry) {
+            auto& cached=target->constants[data.triangleBase];
+            if(!cached) cached=std::make_shared<BufferView12>(MakeClipConstants12(device12.Get(),data));
+            packet->constants=cached;
+        }
+    } else {
         std::lock_guard<std::mutex> lock(mutex);
         const auto& inverse=inScope?activeInverse12:(colorDraw?fallbackColorInverse12:fallbackDepthInverse12);
         memcpy(data.inverseViewProjection,inverse.data(),64);
+        data.viewport[0]=snapshot.viewport.TopLeftX;data.viewport[1]=snapshot.viewport.TopLeftY;
+        data.viewport[2]=snapshot.viewport.Width;data.viewport[3]=snapshot.viewport.Height;
     }
-    data.viewport[0]=snapshot.viewport.TopLeftX;data.viewport[1]=snapshot.viewport.TopLeftY;
-    data.viewport[2]=snapshot.viewport.Width;data.viewport[3]=snapshot.viewport.Height;
-    data.enabled=1;
-    auto packet=std::make_shared<DrawPacket12>();
-    packet->target=target;packet->geometry=geometry;packet->pipeline=pipeline;
-    packet->constants=MakeClipConstants12(device12.Get(),data);
+    if(!packet->constants) packet->constants=std::make_shared<BufferView12>(MakeClipConstants12(device12.Get(),data));
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE,4> clip={
-        packet->constants.view,geometry->views.primitives.view,geometry->views.nodes.view,target->mask.view};
+        packet->constants->view,geometry->views.primitives.view,geometry->views.nodes.view,target->mask.view};
     packet->descriptors=CopyDescriptors12(device12.Get(),snapshot.resources.Get(),root->tables,
-        snapshot.arguments,clip,root->firstClipParameter,root->firstClipParameter+1);
+        snapshot.arguments,clip,root->firstClipParameter,root->firstClipParameter+1,
+        AcquireDescriptorHeap12,nullptr);
     // Retain every draw resource before issuing commands; command list state
     // alone does not own the descriptors after this function returns.
     {
         std::lock_guard<std::mutex> lock(mutex12);
         auto state=drawStates12.find(list);
         if(state==drawStates12.end())return false;
+        std::lock_guard<std::mutex> records(state->second->recordsMutex);
         state->second->recorded.push_back(packet);
     }
     struct ForwardGuard {ForwardGuard(){forwarding12=true;}~ForwardGuard(){forwarding12=false;}} guard;
@@ -638,6 +715,13 @@ void STDMETHODCALLTYPE CaptureDrawIndexed12(ID3D12GraphicsCommandList* list,UINT
     UINT firstIndex,INT baseVertex,UINT firstInstance) {
     if(probing12 && !forwarding12) {
         ++stats12[4];
+        auto& state=RecordingState12(list);
+        uint64_t generation=registeredGeneration12.load(std::memory_order_acquire);
+        if(state.registeredGeneration!=generation){
+            state.registeredGeneration=generation;
+            state.possiblePrivateIndex=state.hasIndex && MayBeRegistered12(state.index.BufferLocation);
+        }
+        if(!state.possiblePrivateIndex){originalDrawIndexed12(list,indices,instances,firstIndex,baseVertex,firstInstance);return;}
         try {if(TryClipDraw12(list,indices,instances,firstIndex,baseVertex,firstInstance))return;}
         catch(const std::exception& ex){
             uint64_t failures=++stats12[13];
@@ -798,7 +882,7 @@ void __stdcall RenderEvent(int id) {
     }
 }
 }
-int LC_GetApiVersion() {return 6;}
+int LC_GetApiVersion() {return 8;}
 int LC_Enable12(int enabled) {
     if(!probing12)return 0;
     clipping12=enabled!=0;
@@ -893,8 +977,9 @@ int LC_Initialize(void* resource) {
         return 1;
     } catch(const std::exception& ex) {Log(ex.what());return 0;}
 }
-int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount) {
+int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount,float branchRadius) {
     try {
+        if(!std::isfinite(branchRadius) || branchRadius<0 || branchRadius>100)return 0;
         if(device12 && probing12) {
             if(!buffer || !eligible || triangleCount<=0 || triangleCount>1000000)return 0;
             auto target=std::make_shared<Target12>();
@@ -905,14 +990,17 @@ int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount) {
                 throw std::runtime_error("invalid D3D12 mesh index resource");
             target->mask=MakeTypedBuffer12(device12.Get(),eligible,size_t(triangleCount)*4,DXGI_FORMAT_R32_UINT,triangleCount);
             target->triangleCount=triangleCount;
+            target->data.tree[3]=branchRadius;
             std::lock_guard<std::mutex> lock(mutex12);
             if(targets12.count(target->index.Get()) || targetAddresses12.count(target->address))
                 throw std::runtime_error("D3D12 private mesh index resource is not unique");
             targets12[target->index.Get()]=target;targetAddresses12[target->address]=target;
+            PublishRegisteredRanges12();
             return 1;
         }
         if(!running || !buffer || !eligible || triangleCount<=0 || triangleCount>1000000) return 0;
         auto target=std::make_shared<Target>(); target->index=static_cast<ID3D11Buffer*>(buffer); target->triangleCount=triangleCount;
+        target->data.tree[3]=branchRadius;
         D3D11_BUFFER_DESC desc{};desc.ByteWidth=triangleCount*4;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;desc.Usage=D3D11_USAGE_IMMUTABLE;
         D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=eligible;
         ComPtr<ID3D11Buffer> mask;
@@ -926,7 +1014,10 @@ void LC_Unregister(void* buffer) {
     if(device12){
         std::lock_guard<std::mutex> lock(mutex12);
         auto found=targets12.find(static_cast<ID3D12Resource*>(buffer));
-        if(found!=targets12.end()){targetAddresses12.erase(found->second->address);targets12.erase(found);}
+        if(found!=targets12.end()){
+            targetAddresses12.erase(found->second->address);targets12.erase(found);
+            PublishRegisteredRanges12();
+        }
         return;
     }
     std::lock_guard<std::mutex> lock(mutex);targets.erase(static_cast<ID3D11Buffer*>(buffer));
@@ -971,6 +1062,7 @@ int LC_BindGeometry(void* buffer,const float* tree,uint64_t id) {
         auto target=targets12.find(static_cast<ID3D12Resource*>(buffer));if(target==targets12.end())return 0;
         auto found=geometries12.find(id);if(id && found==geometries12.end())return 0;
         target->second->geometry=id?found->second:nullptr;
+        target->second->constants.clear();
         auto& data=target->second->data;memcpy(data.tree,tree,12);data.reserved=1;
         data.boxCount=id?found->second->views.nodeCount:0;return 1;
     }
