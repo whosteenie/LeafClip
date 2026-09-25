@@ -12,7 +12,7 @@ ILSpy CLI 7.2.1.6856 was installed locally into ignored `.tools/`. Decompiled so
 .\.tools\ilspycmd.exe -t TreeBase -r lib lib\assembly_valheim.dll
 ```
 
-Inspected types: `TreeBase`, `Plant`, `Piece`, `WearNTear`, `ZNetScene`, `ZoneSystem`, `Version`, `UnityEngine.Mesh`, `BepInEx.BaseUnityPlugin`, and `HarmonyLib.Harmony`. The initial decompile lacked PhysicsModule and some other transitive dependencies, causing incomplete physics type rendering; do not mistake generated `get_*` syntax for original source. The matching PhysicsModule was later copied from the local Valheim installation into ignored `lib/` for the prototype build.
+Inspected types: `TreeBase`, `Plant`, `Piece`, `WearNTear`, `ZNetScene`, `ZoneSystem`, `Version`, `UnityEngine.Mesh`, `BepInEx.BaseUnityPlugin`, and `HarmonyLib.Harmony`. The initial decompile lacked PhysicsModule and some other transitive dependencies, causing incomplete physics type rendering; do not mistake generated `get_*` syntax for original source. The matching PhysicsModule was later copied from the local Valheim installation into ignored `lib/` for the managed build.
 
 `Version.CurrentVersion` initializes `new GameVersion(1, 0, 15)`. Loader assembly identity is BepInEx 5.4.23.5; Harmony assembly identity is 2.9.0.0. Harmony exposes `Patch`, `PatchAll`, and `UnpatchSelf`. The current GPU implementation uses Harmony for tree and piece lifecycle notifications; diagnostics themselves do not need those patches.
 
@@ -60,7 +60,7 @@ Safe first behavior is to leave an unreadable mesh untouched. A legitimately sup
 
 Risks to evaluate:
 
-- Static batches may not reflect a MeshFilter replacement; reject static-batched candidates until experimentally validated. Per-instance copies reduce geometry sharing and may reduce instancing/batching benefits.
+- Static batches may not reflect a MeshFilter replacement; reject static-batched meshes until validated. Per-instance copies reduce geometry sharing and may reduce instancing/batching benefits.
 - Keep original materials, material property blocks, shader keywords, alpha cutoff and lighting. Never access Renderer.material or MeshFilter.mesh during inspection.
 - Every supported mesh LOD must use matching clipping logic. BillboardRenderer and impostor textures need separate support; do not silently hide them. Bounds and LOD crossfades must be checked at distance.
 - Clipping changes shadows as well as visible geometry. Check shadow casting and two-sided foliage cards.
@@ -69,4 +69,4 @@ Risks to evaluate:
 
 ## Current implementation
 
-The initial assembly and asset inspection above records how this project began. The CPU mesh-splitting prototype has been retired. The maintained implementation is GPU pixel-shader clipping after Valheim's wind deformation; see [renderer details](../native/README.md) and the [current validation checklist](../tests/validation.md).
+The initial assembly and asset inspection above records how this project began. The retired CPU mesh-splitting approach has been removed. The maintained implementation is GPU pixel-shader clipping after Valheim's wind deformation; see [renderer details](../native/README.md) and the [current validation checklist](../tests/validation.md).

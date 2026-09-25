@@ -11,10 +11,10 @@ The structure boundary uses readable render meshes where available, so leaves ar
 Requires VS 2022 C++ tools, CMake, a .NET SDK, and the ignored Valheim/BepInEx references in `lib/`. Build and stage a development package with:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-gpu-test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
-Both DLLs and third-party license notices are staged under `artifacts/gpu-test/BepInEx/plugins/LeafClip`. The script does not install into the game. Install both DLLs together for a test. No server mod or world-data change is needed.
+Both DLLs and third-party license notices are staged under `artifacts/package/BepInEx/plugins/LeafClip`. The script does not install into the game. Install both DLLs together for a test. No server mod or world-data change is needed.
 
 ## Testing
 

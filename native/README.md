@@ -9,10 +9,10 @@ Animated world position is reconstructed from `SV_Position` and the current came
 ## Build and tests
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-gpu-test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
-This configures/builds the native library, runs the D3D11 and D3D12 WARP rendering tests, builds the BepInEx plugin and stages both DLLs plus license notices in `artifacts/gpu-test/BepInEx/plugins/LeafClip`. Nothing is installed or published. The D3D12 test intercepts a registered indexed draw, patches its PSO on a worker, copies live descriptors, binds the expanded root signature, checks the resulting pixels against the direct patched reference, checks restoration on a following draw, and verifies fence-based resource retirement. The D3D11 tests compare original and patched pixel/depth outputs under animated wind, three projection setups, 257 boxes, a sloped mesh surface, primitive masks, hook state restoration, and teardown. All 408 distinct SM4 pixel shader variants extracted from the locally installed Valheim `Custom/Vegetation` shader also accepted patching and D3D11 shader creation. Those game assets are not shipped. These tests do not substitute for a Valheim runtime check.
+This configures/builds the native library, runs the D3D11 and D3D12 WARP rendering tests, builds the BepInEx plugin and stages both DLLs plus license notices in `artifacts/package/BepInEx/plugins/LeafClip`. Nothing is installed or published. The D3D12 test intercepts a registered indexed draw, patches its PSO on a worker, copies live descriptors, binds the expanded root signature, checks the resulting pixels against the direct patched reference, checks restoration on a following draw, and verifies fence-based resource retirement. The D3D11 tests compare original and patched pixel/depth outputs under animated wind, three projection setups, 257 boxes, a sloped mesh surface, primitive masks, hook state restoration, and teardown. All 408 distinct SM4 pixel shader variants extracted from the locally installed Valheim `Custom/Vegetation` shader also accepted patching and D3D11 shader creation. Those game assets are not shipped. These tests do not substitute for a Valheim runtime check.
 
 ## In-game check
 

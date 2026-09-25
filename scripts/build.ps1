@@ -11,11 +11,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Native renderer tests failed' }
     dotnet build src/LeafClip/LeafClip.csproj -c $Configuration
     if ($LASTEXITCODE -ne 0) { throw 'Managed build failed' }
-    $stage = Join-Path $repoRoot 'artifacts/gpu-test/BepInEx/plugins/LeafClip'
+    $stage = Join-Path $repoRoot 'artifacts/package/BepInEx/plugins/LeafClip'
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item -LiteralPath "src/LeafClip/bin/$Configuration/net472/LeafClip.dll" -Destination $stage
     Copy-Item -LiteralPath "artifacts/native/$Configuration/LeafClip.Native.dll" -Destination $stage
-    Copy-Item -LiteralPath 'native/README.md' -Destination (Join-Path $stage 'GPU-TEST.md')
+    Copy-Item -LiteralPath 'native/README.md' -Destination (Join-Path $stage 'README.md')
     $licenses = Join-Path $stage 'licenses'
     New-Item -ItemType Directory -Force $licenses | Out-Null
     Copy-Item -LiteralPath 'native/third_party/NOTICE.md','native/third_party/DXC-LICENSE.txt','native/third_party/AMD-LICENSE.txt','native/third_party/DXBCChecksum.h' -Destination $licenses
