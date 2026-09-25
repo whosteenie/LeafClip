@@ -3,11 +3,12 @@ using System.Collections.Generic;
 using System.IO;
 using BepInEx;
 using BepInEx.Configuration;
+using HarmonyLib;
 using UnityEngine;
 
 namespace LeafClip
 {
-    [BepInPlugin("local.leafclip.diagnostics", "LeafClip Diagnostics", "0.1.0")]
+    [BepInPlugin("local.leafclip.diagnostics", "LeafClip", "0.2.0")]
     public sealed class Plugin : BaseUnityPlugin
     {
         private ConfigEntry<bool> diagnostics, prefabs, probe;
@@ -21,7 +22,8 @@ namespace LeafClip
         private ZNetScene scene;
         private bool scheduled;
         private MeshInspector inspector;
-        private ClipPrototype clip;
+        private GpuClipPrototype gpu;
+        private Harmony harmony;
 
         private void Awake()
         {
@@ -35,13 +37,15 @@ namespace LeafClip
             handledRequest = request.Value;
             configStamp = File.GetLastWriteTimeUtc(Config.ConfigFilePath);
             inspector = new MeshInspector(s => Logger.LogInfo(s));
-            clip = new ClipPrototype(this);
-            Logger.LogInfo("Diagnostic build loaded. Mesh clipping is experimental and off by default; no network changes. Enable Diagnostics in local.leafclip.diagnostics.cfg to inspect trees.");
+            gpu = new GpuClipPrototype(this);
+            harmony = new Harmony("local.leafclip.runtime");
+            harmony.PatchAll(typeof(Plugin).Assembly);
+            Logger.LogInfo("LeafClip loaded. D3D11 clipping starts automatically; older Prototype/GpuClip Enabled entries are ignored.");
         }
 
         private void Update()
         {
-            clip.Update();
+            gpu.Update();
             if (Time.realtimeSinceStartup >= nextPoll)
             {
                 nextPoll = Time.realtimeSinceStartup + 5f;
@@ -130,6 +134,6 @@ namespace LeafClip
 
         internal void LogClip(string message) { Logger.LogInfo(message); }
 
-        private void OnDestroy() { clip?.Dispose(); pending.Clear(); probed.Clear(); }
+        private void OnDestroy() { harmony?.UnpatchSelf(); gpu?.Dispose(); pending.Clear(); probed.Clear(); }
     }
 }

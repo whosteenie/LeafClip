@@ -26,6 +26,7 @@ namespace LeafClip
         private float wasClearance, wasWindGuard;
         private float nextHeartbeat, nextDistanceCheck;
         internal static ClipPrototype Current;
+        private bool EffectiveEnabled => enabled.Value && !plugin.GpuActive;
 
         internal ClipPrototype(Plugin plugin)
         {
@@ -43,7 +44,7 @@ namespace LeafClip
             Current = this;
             harmony = new Harmony("local.leafclip.prototype");
             harmony.PatchAll(typeof(ClipPrototype).Assembly);
-            wasEnabled = enabled.Value;
+            wasEnabled = EffectiveEnabled;
             wasClippingWood = clipWood.Value;
             wasIncludingBeams = includeBeams.Value;
             wasIncludingRoofs = includeRoofs.Value;
@@ -54,9 +55,9 @@ namespace LeafClip
 
         internal void Update()
         {
-            if (enabled.Value != wasEnabled)
+            if (EffectiveEnabled != wasEnabled)
             {
-                wasEnabled = enabled.Value;
+                wasEnabled = EffectiveEnabled;
                 if (wasEnabled) EnqueueAll();
                 else
                 {
@@ -64,7 +65,7 @@ namespace LeafClip
                     dirty.Clear(); queued.Clear(); nearTrees.Clear();
                 }
             }
-            if (!enabled.Value) return;
+            if (!EffectiveEnabled) return;
             if (clipWood.Value != wasClippingWood)
             {
                 wasClippingWood = clipWood.Value;
@@ -130,7 +131,7 @@ namespace LeafClip
             // this guarded prototype cannot modify.
             if (!HasFoliageSlot(tree)) return;
             knownTrees.Add(tree);
-            if (enabled.Value && WithinPlayerDistance(tree) && nearTrees.Add(tree.GetInstanceID())) Enqueue(tree);
+            if (EffectiveEnabled && WithinPlayerDistance(tree) && nearTrees.Add(tree.GetInstanceID())) Enqueue(tree);
         }
 
         private bool WithinPlayerDistance(TreeBase tree)
@@ -163,13 +164,13 @@ namespace LeafClip
 
         private void Enqueue(TreeBase tree)
         {
-            if (!enabled.Value || !WithinPlayerDistance(tree)) return;
+            if (!EffectiveEnabled || !WithinPlayerDistance(tree)) return;
             if (queued.Add(tree.GetInstanceID())) dirty.Enqueue(tree);
         }
 
         private void NotifyPiece(Piece piece)
         {
-            if (!enabled.Value || !IsObstructionPiece(piece)) return;
+            if (!EffectiveEnabled || !IsObstructionPiece(piece)) return;
             int pieceLayer = LayerMask.NameToLayer("piece");
             int nonsolidLayer = LayerMask.NameToLayer("piece_nonsolid");
             if (pieceLayer < 0) return;
@@ -411,25 +412,25 @@ namespace LeafClip
         [HarmonyPatch(typeof(TreeBase), "Awake")]
         private static class TreeAwakePatch
         {
-            private static void Postfix(TreeBase __instance) { Current?.RegisterTree(__instance); }
+            private static void Postfix(TreeBase __instance) { Current?.RegisterTree(__instance); GpuClipPrototype.Current?.Register(__instance); }
         }
 
         [HarmonyPatch(typeof(Piece), "Awake")]
         private static class PieceAwakePatch
         {
-            private static void Postfix(Piece __instance) { Current?.NotifyPiece(__instance); }
+            private static void Postfix(Piece __instance) { Current?.NotifyPiece(__instance); GpuClipPrototype.Current?.Notify(__instance); }
         }
 
         [HarmonyPatch(typeof(Piece), "SetCreator")]
         private static class PieceCreatorPatch
         {
-            private static void Postfix(Piece __instance) { Current?.NotifyPiece(__instance); }
+            private static void Postfix(Piece __instance) { Current?.NotifyPiece(__instance); GpuClipPrototype.Current?.Notify(__instance); }
         }
 
         [HarmonyPatch(typeof(Piece), "OnDestroy")]
         private static class PieceDestroyPatch
         {
-            private static void Prefix(Piece __instance) { Current?.NotifyPiece(__instance); }
+            private static void Prefix(Piece __instance) { Current?.NotifyPiece(__instance); GpuClipPrototype.Current?.Notify(__instance); }
         }
     }
 
