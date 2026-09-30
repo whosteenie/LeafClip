@@ -29,6 +29,7 @@ namespace LeafClip
             internal readonly List<Collider> Colliders = new List<Collider>();
             internal int BranchTriangles;
             internal int TrunkTriangles;
+            internal int GuidedLeafGroups;
             internal bool Dirty = true;
             internal int Signature;
             internal bool HasSignature;
@@ -47,8 +48,8 @@ namespace LeafClip
         internal static GpuClip Current;
         private readonly Plugin plugin;
         private readonly ConfigEntry<float> distance, boundsPadding;
-        private readonly ConfigEntry<bool> visualizeClipping;
-        private readonly bool visualModeAtStartup;
+        private readonly ConfigEntry<bool> visualizeClipping, visualizeBranchAssignment;
+        private readonly int visualModeAtStartup;
         private readonly HashSet<TreeBase> known = new HashSet<TreeBase>();
         private readonly Dictionary<TreeBase, List<Bounds>> dormant = new Dictionary<TreeBase, List<Bounds>>();
         private readonly List<TreeEntry> active = new List<TreeEntry>();
@@ -77,7 +78,9 @@ namespace LeafClip
             boundsPadding = plugin.Config.Bind("GpuClip", "WindBoundsPadding", 3f, new ConfigDescription("Broad-phase/culling envelope only; never expands the actual clipping boundary.", new AcceptableValueRange<float>(0f, 20f)));
             visualizeClipping = plugin.Config.Bind("Diagnostics", "VisualizeClipping", false,
                 "D3D12 only: color tree pixels by clipping decision and outline nearby structure spans. Red=would hide; yellow/orange/white=wall crossing rejected increasingly far beyond its span; lime=span metadata conflict; blue=no wall hit; purple=excluded. Magenta=world-aligned renderer bounds; cyan=world-aligned span sent to shader. Outlines do not follow the structure's rotation. Requires a game restart.");
-            visualModeAtStartup = visualizeClipping.Value;
+            visualizeBranchAssignment = plugin.Config.Bind("Diagnostics", "VisualizeBranchAssignment", false,
+                "D3D12 only: color each candidate bark branch and its assigned leaf clusters with the same hue. Bark is darker; magenta=protected trunk; white=unassigned leaves; dark gray=other mesh. This takes priority over VisualizeClipping and requires a game restart.");
+            visualModeAtStartup = visualizeBranchAssignment.Value ? 2 : visualizeClipping.Value ? 1 : 0;
             Current = this;
             Camera.onPreCull += BeforeCamera;
             Initialize();
@@ -96,13 +99,14 @@ namespace LeafClip
                 marker.Apply();
                 if (backend == GraphicsDeviceType.Direct3D12)
                 {
-                    if (native.SetVisualDiagnostic12(visualModeAtStartup ? 1 : 0) == 0)
+                    if (native.SetVisualDiagnostic12(visualModeAtStartup) == 0)
                         throw new InvalidOperationException("D3D12 visual diagnostic setup failed.");
                     probing12 = native.Initialize12(marker.GetNativeTexturePtr()) != 0;
                     if (!probing12) throw new InvalidOperationException("D3D12 initialization failed; inspect native messages.");
                     initialized = native.Enable12(1) != 0;
                     if (!initialized) throw new InvalidOperationException("D3D12 clipping activation failed; inspect native messages.");
-                    plugin.LogClip(visualModeAtStartup ? "D3D12 clipping visual diagnostic active." : "D3D12 clipping active.");
+                    plugin.LogClip(visualModeAtStartup == 2 ? "D3D12 branch-assignment visual diagnostic active." :
+                        visualModeAtStartup == 1 ? "D3D12 clipping visual diagnostic active." : "D3D12 clipping active.");
                     return;
                 }
                 initialized = native.Initialize(marker.GetNativeTexturePtr()) != 0;
@@ -183,8 +187,8 @@ namespace LeafClip
             if (!probing12 && Time.realtimeSinceStartup >= nextReport)
             {
                 nextReport = Time.realtimeSinceStartup + 15f;
-                var stats = new ulong[8]; native.GetStats(stats, stats.Length);
-                plugin.LogClip($"GpuClip trees={active.Count}, shadersCaptured={stats[0]}, patched={stats[1]}, rejected={stats[2]}, matchedDraws={stats[3]}, clippedDraws={stats[4]}, uncapturedDraws={stats[5]}, unsupportedDraws={stats[6]}, errors={stats[7]}.");
+                var stats = new ulong[10]; native.GetStats(stats, stats.Length);
+                plugin.LogClip($"GpuClip trees={active.Count}, shadersCaptured={stats[0]}, patched={stats[1]}, rejected={stats[2]}, matchedDraws={stats[3]}, clippedDraws={stats[4]}, uncapturedDraws={stats[5]}, unsupportedDraws={stats[6]}, errors={stats[7]}, outsideScope={stats[8]}, outsideClipped={stats[9]}.");
             }
         }
         private void SelectTrees()
@@ -229,7 +233,7 @@ namespace LeafClip
                         return;
                     }
                     active.Add(entry);
-                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}, branchTriangles={entry.BranchTriangles}, upperTrunkTriangles={entry.TrunkTriangles}. Original vertex data and triangle topology retained.");
+                    plugin.LogClip($"GpuClip target {tree.name} id={tree.GetInstanceID()}, meshes={entry.Meshes.Count}, branchTriangles={entry.BranchTriangles}, upperTrunkTriangles={entry.TrunkTriangles}, guidedLeafGroups={entry.GuidedLeafGroups}. Original vertex data and triangle topology retained.");
                 }
                 catch (Exception ex) { if (entry != null) Restore(entry); unsupported.Add(tree.GetInstanceID()); plugin.LogClip("GpuClip target failed: " + ex.Message); }
         }
@@ -252,8 +256,11 @@ namespace LeafClip
                 if (hit && StructuralPieces.Includes(hit.GetComponentInParent<Piece>())) return true;
             return false;
         }
-        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer, out int branchTriangles, out int trunkTriangles, out float branchRadius)
+        private uint[] Eligibility(Mesh mesh, MeshRenderer renderer, out int branchTriangles,
+            out int trunkTriangles, out float branchRadius, out float[] guides, out int guidedGroups)
         {
+            guides = Array.Empty<float>();
+            guidedGroups = 0;
             branchTriangles = 0;
             trunkTriangles = 0;
             branchRadius = 0f;
@@ -279,6 +286,11 @@ namespace LeafClip
             if (selected)
             {
                 branchTriangles = TopologyFoliage.MarkBark(mesh, materials, mask, out branchRadius, out trunkTriangles);
+                BranchAssignment.Summary summary = BranchAssignment.Assign(mesh, mask, branchRadius,
+                    renderer.transform.localToWorldMatrix, out guides);
+                guidedGroups = summary.Guided;
+                if ((visualModeAtStartup == 2 && probing12) || summary.SupportFallback != 0)
+                    plugin.LogClip($"Branch assignment {renderer.name}: {summary.Branches} bark regions, {summary.BarkGuides} bark guides, {summary.LeafGroups} connected leaf groups, {summary.Assigned} assigned, {summary.Unassigned} unassigned, {summary.Guided} leaf guides, {summary.Supported} rooted supports, {summary.SupportFallback} support fallbacks, {summary.GuidedBark} supported bark triangles.");
                 return mask;
             }
             if (mesh.subMeshCount != 1 || materials.Length != 1 || !materials[0] || !materials[0].shader ||
@@ -313,9 +325,11 @@ namespace LeafClip
                     bool triangles = true;
                     for (int i = 0; i < source.subMeshCount; i++) triangles &= source.GetTopology(i) == MeshTopology.Triangles;
                     if (!triangles) continue;
-                    uint[] mask = Eligibility(source, renderer, out int branches, out int trunk, out float branchRadius); if (mask == null) continue;
+                    uint[] mask = Eligibility(source, renderer, out int branches, out int trunk,
+                        out float branchRadius, out float[] guides, out int guidedGroups); if (mask == null) continue;
                     result.BranchTriangles += branches;
                     result.TrunkTriangles += trunk;
+                    result.GuidedLeafGroups += guidedGroups;
                     Vector3[] vertices = source.vertices;
                     for (int slot = 0; slot < source.subMeshCount; slot++)
                     {
@@ -354,7 +368,8 @@ namespace LeafClip
                     entry.Buffer = entry.Private.GetNativeIndexBufferPtr();
                     Vector3 worldScale = renderer.transform.lossyScale;
                     float worldBranchRadius = branchRadius * Mathf.Max(Mathf.Abs(worldScale.x), Mathf.Abs(worldScale.z));
-                    if (native.Register(entry.Buffer, mask, mask.Length, worldBranchRadius) == 0) throw new InvalidOperationException("native mesh registration failed");
+                    if (native.Register(entry.Buffer, mask, mask.Length, worldBranchRadius,
+                        guides, guides.Length / 4) == 0) throw new InvalidOperationException("native mesh registration failed");
                     meshFilter.sharedMesh = entry.Private;
                     renderer.sharedMaterials = entry.PrivateMaterials;
                 }
@@ -442,10 +457,10 @@ namespace LeafClip
             // uncropped warmup is preferable to an obsolete cut after demolition.
             ClearBoxes(tree);
             tree.Signature = signature; tree.HasSignature = true;
-            geometry.Snapshot(tree.Colliders, tree.Bounds, visualModeAtStartup && probing12,
+            geometry.Snapshot(tree.Colliders, tree.Bounds, visualModeAtStartup == 1 && probing12,
                 out float[] boxes, out float[] triangles, out List<StructuralGeometry.SpanOutline> spanOutlines,
                 out int visualPieces, out int fallbackPieces, out int wallCandidates, out int joinedWalls, out int skipped);
-            if (visualModeAtStartup && probing12)
+            if (visualModeAtStartup == 1 && probing12)
             {
                 try { ShowSpanOutlines(tree, spanOutlines); }
                 catch (Exception ex) { ClearSpanOutlines(tree); plugin.LogClip("Span overlay failed: " + ex.Message); }
@@ -554,8 +569,8 @@ namespace LeafClip
             }
             float[] backbuffer = CameraInverse(current, false);
             float[] texture = CameraInverse(current, true);
-            if (probing12 && native.SetFallbackCamera12(backbuffer, texture, current.pixelWidth, current.pixelHeight) == 0)
-                plugin.LogClip("D3D12 fallback camera update failed.");
+            if (native.SetFallbackCamera12(backbuffer, texture, current.pixelWidth, current.pixelHeight) == 0)
+                plugin.LogClip("GPU fallback camera update failed.");
             foreach (CameraScope scope in cameraScopes)
             {
                 int token = native.QueueCamera(scope.RenderToTexture ? texture : backbuffer);

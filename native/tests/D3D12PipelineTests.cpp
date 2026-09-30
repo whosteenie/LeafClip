@@ -21,7 +21,8 @@ template<class T> struct alignas(void*) StreamField {D3D12_PIPELINE_STATE_SUBOBJ
 }
 int main() {
     try {
-        if(LC_GetApiVersion()!=9 || !LC_SetVisualDiagnostic12(0))
+        if(LC_GetApiVersion()!=13 || !LC_SetVisualDiagnostic12(2) ||
+           LC_SetVisualDiagnostic12(3) || !LC_SetVisualDiagnostic12(0))
             throw std::runtime_error("D3D12 visual diagnostic startup setting failed");
         ComPtr<IDXGIFactory4> factory;
         Check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)),"DXGI factory");
@@ -220,7 +221,7 @@ int main() {
         auto nodes=makeBuffer(geometry.nodes.size()*16,geometry.nodes.data());
         auto primitives=makeBuffer(geometry.primitives.size()*16,geometry.primitives.data());
         uint32_t eligibility[]={1,1};auto mask=makeBuffer(sizeof(eligibility),eligibility);
-        if(!LC_Register(index.Get(),eligibility,2,0))throw std::runtime_error("D3D12 private mesh registration failed");
+        if(!LC_Register(index.Get(),eligibility,2,0,nullptr,0))throw std::runtime_error("D3D12 private mesh registration failed");
         uint64_t registeredGeometry=LC_CreateGeometry(box,1,nullptr,0);
         float treeOrigin[]={-2.f,0.f,0.f};
         if(!registeredGeometry || !LC_BindGeometry(index.Get(),treeOrigin,registeredGeometry))

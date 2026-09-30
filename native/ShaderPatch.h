@@ -9,7 +9,7 @@
 
 namespace leafclip {
 using Microsoft::WRL::ComPtr;
-constexpr unsigned MaxBoxes = 64;
+constexpr unsigned MaxBoxes = 85;
 struct ClipConstants {
     float inverseViewProjection[16]; // row-major; multiplied by a column vector
     float viewport[4];
@@ -22,5 +22,5 @@ ComPtr<ID3DBlob> Compile(const std::string& source, const char* profile);
 // The original shader's executable body is copied verbatim. Only the helper's
 // registers are relocated. Unsupported layouts throw and must render unmodified.
 std::vector<uint8_t> PatchPixelShader(const void* data, size_t size, bool useAnimatedWorldPosition=false,
-    bool visualDiagnostic=false);
+    int visualDiagnostic=0);
 }

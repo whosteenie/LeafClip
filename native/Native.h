@@ -16,7 +16,8 @@ LC_API int LC_Enable12(int enabled);
 LC_API int LC_SetFallbackCamera12(const float* backbufferInverse,const float* textureInverse,int width,int height);
 LC_API void LC_GetStats12(uint64_t* values,int count);
 LC_API int LC_GetApiVersion();
-LC_API int LC_Register(void* indexBuffer,const uint32_t* eligible,int triangleCount,float branchRadius);
+LC_API int LC_Register(void* indexBuffer,const uint32_t* eligible,int triangleCount,float branchRadius,
+    const float* guides,int guideCount);
 LC_API void LC_Unregister(void* indexBuffer);
 LC_API int LC_SetObstructions(void* indexBuffer,const float* tree,const float* inverseBoxes,int count);
 LC_API uint64_t LC_CreateGeometry(const float* boxes,int boxCount,const float* triangles,int triangleCount);

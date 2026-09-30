@@ -164,6 +164,38 @@ int main(int argc,char** argv) {
         }
         Require(red>20 && blue>20,"visual diagnostic did not mark both accepted and missed pixels: red="+
             std::to_string(red)+" blue="+std::to_string(blue)+" normalRemoved="+std::to_string(normalRemoved));
+        auto branchBytes=PatchPixelShader(diagnosticCode->GetBufferPointer(),diagnosticCode->GetBufferSize(),false,2);
+        ComPtr<ID3D11PixelShader> branchShader;
+        Check(h.device->CreatePixelShader(branchBytes.data(),branchBytes.size(),nullptr,&branchShader),
+            "branch-assignment diagnostic shader");
+        uint32_t assigned[2]={1u|(1u<<2),1u|(2u<<2)};
+        h.context->UpdateSubresource(h.mask.Get(),0,nullptr,assigned,0,0);
+        Image branchImage=h.Draw(branchShader.Get());
+        auto branchColor=[](unsigned id) {
+            Pixel color{};
+            constexpr float phaseStep=2.3999632f;
+            color.r=.3f+.7f*(.5f+.5f*std::cos(float(id)*phaseStep));
+            color.g=.3f+.7f*(.5f+.5f*std::cos(float(id)*phaseStep+2.0943951f));
+            color.b=.3f+.7f*(.5f+.5f*std::cos(float(id)*phaseStep+4.1887902f));
+            return color;
+        };
+        Pixel firstBranch=branchColor(1),secondBranch=branchColor(2);
+        size_t firstSeen=0,secondSeen=0;
+        for(const Pixel& pixel:branchImage.pixels) if(pixel.a>.5f) {
+            auto closeColor=[](const Pixel& a,const Pixel& b) {
+                return std::abs(a.r-b.r)<.02f && std::abs(a.g-b.g)<.02f && std::abs(a.b-b.b)<.02f;
+            };
+            if(closeColor(pixel,firstBranch))++firstSeen;
+            if(closeColor(pixel,secondBranch))++secondSeen;
+        }
+        Require(firstSeen>20 && secondSeen>20,"branch diagnostic did not preserve separate leaf assignments");
+        uint32_t unassigned[2]={1,1};
+        h.context->UpdateSubresource(h.mask.Get(),0,nullptr,unassigned,0,0);
+        Image unassignedImage=h.Draw(branchShader.Get());
+        size_t white=0;
+        for(const Pixel& pixel:unassignedImage.pixels)
+            if(pixel.r>.98f && pixel.g>.98f && pixel.b>.98f && pixel.a>.5f)++white;
+        Require(white>20,"branch diagnostic did not mark unassigned leaves white");
         auto mrtCode=Compile(R"(
             struct GBuffer {float4 diffuse:SV_Target0;float4 specular:SV_Target1;
                             float4 normal:SV_Target2;float4 emission:SV_Target3;};
@@ -211,10 +243,10 @@ int main(int argc,char** argv) {
             "deferred diagnostic did not write full-color emission with black diffuse: red="+
             std::to_string(emissionRed)+" blue="+std::to_string(emissionBlue)+
             " diffuse="+std::to_string(diffuseBright));
-        auto spanImage=[&](float wallHalfWidth,float storedHalfWidth) {
-            const float wall[]={0,-1,-wallHalfWidth, 0,-1,wallHalfWidth, 0,1,wallHalfWidth,
+        auto spanImage=[&](float wallHalfWidth,float storedHalfWidth,float wallTop,bool guided,bool parentPath=false,bool bark=false) {
+            const float wall[]={0,-1,-wallHalfWidth, 0,-1,wallHalfWidth, 0,wallTop,wallHalfWidth,
                                 -storedHalfWidth,storedHalfWidth,
-                                0,-1,-wallHalfWidth, 0,1,wallHalfWidth, 0,1,-wallHalfWidth,
+                                0,-1,-wallHalfWidth, 0,wallTop,wallHalfWidth, 0,wallTop,-wallHalfWidth,
                                 -storedHalfWidth,storedHalfWidth};
             GeometryData geometry=BuildGeometry(nullptr,0,wall,2);
             auto nodeBuffer=h.Buffer(UINT(geometry.nodes.size()*sizeof(geometry.nodes[0])),
@@ -230,11 +262,17 @@ int main(int argc,char** argv) {
             auto primitiveView=primitives.Get();auto nodeView=nodes.Get();
             h.context->PSSetShaderResources(125,1,&primitiveView);
             h.context->PSSetShaderResources(126,1,&nodeView);
+            uint32_t selected[2]={bark?(guided?2u|(1u<<12):2u):(guided?1u|(1u<<12):1u),
+                                  bark?(guided?2u|(1u<<12):2u):(guided?1u|(1u<<12):1u)};
+            h.context->UpdateSubresource(h.mask.Get(),0,nullptr,selected,0,0);
+            float* guides=&h.params.inverseBoxes[0][0];
+            guides[4]=.65f;guides[5]=.8f;guides[6]=.5f;guides[7]=parentPath?2:0;
+            guides[8]=-.1f;guides[9]=.8f;guides[10]=0;guides[11]=0;
             h.params.tree[0]=-.2f;h.params.tree[2]=0;
             h.params.boxCount=UINT(geometry.nodes.size()/2);h.params.reserved=1;h.SetFrame(0,0);
             return h.Draw(diagnosticShader.Get());
         };
-        Image beyondPiece=spanImage(.25f,.25f),wrongBounds=spanImage(.75f,.1f);
+        Image beyondPiece=spanImage(.25f,.25f,1,false),wrongBounds=spanImage(.75f,.1f,1,false);
         size_t distalRed=0,lime=0;
         for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
             float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
@@ -247,6 +285,77 @@ int main(int argc,char** argv) {
             if(pixel.r>.3f && pixel.r<.5f && pixel.g>.9f && pixel.b<.1f)++lime;
         Require(distalRed>20 && lime>20,"span diagnostic failed to retain distal leaves behind a real wall crossing while marking incorrect bounds: red="+
             std::to_string(distalRed)+" lime="+std::to_string(lime));
+        Image underBranch=spanImage(.75f,.75f,.2f,false);
+        Image branchClear=spanImage(.75f,.75f,.2f,true);
+        size_t legacyOvercut=0,protectedLeaf=0;
+        for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
+            float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
+            float worldY=1.0f-2.0f*(y+.5f)/Harness::Size;
+            if(worldX<.3f || worldY>0)continue;
+            const Pixel& old=underBranch.pixels[y*Harness::Size+x];
+            const Pixel& guided=branchClear.pixels[y*Harness::Size+x];
+            if(old.r>.9f && old.g<.1f && old.b<.1f)++legacyOvercut;
+            if(guided.b>.9f && guided.r<.1f && guided.g<.3f)++protectedLeaf;
+        }
+        Require(legacyOvercut>20 && protectedLeaf>20,
+            "a wall below a clear branch still cut guided leaves");
+        Image detachedChild=spanImage(.1f,.1f,1,true);
+        Image supportedChild=spanImage(.1f,.1f,1,true,true);
+        size_t restoredByParent=0;
+        for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
+            float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
+            if(worldX<.3f)continue;
+            const Pixel& direct=detachedChild.pixels[y*Harness::Size+x];
+            const Pixel& parent=supportedChild.pixels[y*Harness::Size+x];
+            if(direct.b>.9f && direct.r<.1f && parent.r>.9f && parent.g<.1f)++restoredByParent;
+        }
+        Require(restoredByParent>20,"a child leaf did not inherit a parent branch wall cut");
+        Image detachedBark=spanImage(.1f,.1f,1,true,false,true);
+        Image supportedBark=spanImage(.1f,.1f,1,true,true,true);
+        size_t barkInherited=0;
+        for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
+            float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
+            if(worldX<.3f)continue;
+            const Pixel& direct=detachedBark.pixels[y*Harness::Size+x];
+            const Pixel& parent=supportedBark.pixels[y*Harness::Size+x];
+            if(direct.b>.9f && direct.r<.1f && parent.r>.9f && parent.g<.1f)++barkInherited;
+        }
+        Require(barkInherited>20,"child bark did not inherit a parent branch wall cut");
+        const float roof[]={.1f,.1f,0, .9f,.1f,0, .9f,.1f,.9f, .1f,.9f,
+                            .1f,.1f,0, .9f,.1f,.9f, .1f,.1f,.9f, .1f,.9f};
+        GeometryData roofGeometry=BuildGeometry(nullptr,0,roof,2);
+        auto roofNodes=h.Buffer(UINT(roofGeometry.nodes.size()*sizeof(roofGeometry.nodes[0])),
+            D3D11_BIND_SHADER_RESOURCE,roofGeometry.nodes.data());
+        auto roofPrimitives=h.Buffer(UINT(roofGeometry.primitives.size()*sizeof(roofGeometry.primitives[0])),
+            D3D11_BIND_SHADER_RESOURCE,roofGeometry.primitives.data());
+        D3D11_SHADER_RESOURCE_VIEW_DESC roofView{};roofView.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;
+        ComPtr<ID3D11ShaderResourceView> roofNodeView,roofPrimitiveView;
+        roofView.Format=DXGI_FORMAT_R32G32B32A32_UINT;
+        roofView.Buffer.NumElements=UINT(roofGeometry.nodes.size());
+        Check(h.device->CreateShaderResourceView(roofNodes.Get(),&roofView,&roofNodeView),"leaf roof nodes");
+        roofView.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        roofView.Buffer.NumElements=UINT(roofGeometry.primitives.size());
+        Check(h.device->CreateShaderResourceView(roofPrimitives.Get(),&roofView,&roofPrimitiveView),"leaf roof triangles");
+        auto roofNodeResource=roofNodeView.Get(),roofPrimitiveResource=roofPrimitiveView.Get();
+        h.context->PSSetShaderResources(125,1,&roofPrimitiveResource);
+        h.context->PSSetShaderResources(126,1,&roofNodeResource);
+        uint32_t guidedMask[2]={1u|(1u<<12),1u|(1u<<12)};
+        h.context->UpdateSubresource(h.mask.Get(),0,nullptr,guidedMask,0,0);
+        h.params.boxCount=UINT(roofGeometry.nodes.size()/2);h.params.reserved=1;h.SetFrame(0,0);
+        Image leafThroughRoof=h.Draw(diagnosticShader.Get());
+        size_t roofCut=0,roofKept=0;
+        for(UINT y=0;y<Harness::Size;++y)for(UINT x=0;x<Harness::Size;++x) {
+            float worldX=2.0f*(x+.5f)/Harness::Size-1.0f;
+            float worldY=1.0f-2.0f*(y+.5f)/Harness::Size;
+            if(worldX<.3f || worldX>.7f)continue;
+            const Pixel& pixel=leafThroughRoof.pixels[y*Harness::Size+x];
+            if(worldY<0 && pixel.r>.9f && pixel.g<.1f && pixel.b<.1f)++roofCut;
+            if(worldY>.3f && pixel.b>.9f && pixel.r<.1f && pixel.g<.3f)++roofKept;
+        }
+        Require(roofCut>20 && roofKept>20,"guided leaves did not cut locally through a roof");
+        uint32_t plainMask[2]={1,1};h.context->UpdateSubresource(h.mask.Get(),0,nullptr,plainMask,0,0);
+        h.params.inverseBoxes[0][4]=0;h.params.inverseBoxes[0][5]=1/.35f;
+        h.params.inverseBoxes[0][6]=0;h.params.inverseBoxes[0][7]=0;
         ID3D11ShaderResourceView* empty=nullptr;
         h.context->PSSetShaderResources(125,1,&empty);h.context->PSSetShaderResources(126,1,&empty);
         h.params.tree[0]=-2;h.params.boxCount=1;h.params.reserved=0;
@@ -260,19 +369,27 @@ int main(int argc,char** argv) {
         Check(h.device->CreatePixelShader(worldBytes.data(),worldBytes.size(),nullptr,&worldPatched),
             "animated world-position patch");
         if(argc==2) {
-            size_t accepted=0,rejected=0;std::map<std::string,int> reasons;
+            size_t accepted=0,rejected=0,animated=0;std::map<std::string,int> reasons;
             for(auto& entry:std::filesystem::directory_iterator(argv[1])) {
                 if(entry.path().extension()!=".dxbc")continue;
                 std::ifstream stream(entry.path(),std::ios::binary);
                 std::vector<uint8_t> code((std::istreambuf_iterator<char>(stream)),{});
                 try {
-                    auto bytes=PatchPixelShader(code.data(),code.size());ComPtr<ID3D11PixelShader> ps;
+                    std::vector<uint8_t> bytes;
+                    try {
+                        bytes=PatchPixelShader(code.data(),code.size(),true);
+                        ComPtr<ID3D11PixelShader> ps;
+                        Check(h.device->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&ps),"animated asset variant");
+                        ++animated;
+                    } catch(const std::exception&) { bytes=PatchPixelShader(code.data(),code.size(),false); }
+                    ComPtr<ID3D11PixelShader> ps;
                     Check(h.device->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&ps),"asset variant");++accepted;
                 }catch(const std::exception& ex){++rejected;++reasons[ex.what()];}
             }
-            std::cout<<"Local shader compatibility: accepted="<<accepted<<" rejected="<<rejected<<"\n";
+            std::cout<<"Local shader compatibility: accepted="<<accepted<<" animated="<<animated<<" rejected="<<rejected<<"\n";
             for(auto& reason:reasons)std::cout<<reason.second<<": "<<reason.first<<"\n";
             Require(accepted>0,"no compatible local shader variants");
+            Require(rejected==0,"local vegetation shader variants were rejected");
         }
         for(int projection=0;projection<3;++projection)for(int frame=0;frame<4;++frame) {
             h.params.enabled=1;h.SetFrame(frame*1.7f,projection);
@@ -303,7 +420,7 @@ int main(int argc,char** argv) {
         uint32_t none[2]={0,0};h.context->UpdateSubresource(h.mask.Get(),0,nullptr,none,0,0);
         h.params.enabled=1;h.SetFrame(1,0);auto before=h.Draw(h.original.Get());h.Verify(before,h.Draw(h.patched.Get()),false);
         uint32_t all[2]={1,1};h.context->UpdateSubresource(h.mask.Get(),0,nullptr,all,0,0);
-        Require(LC_Register(h.index.Get(),all,2,0)!=0,"register test draw");
+        Require(LC_Register(h.index.Get(),all,2,0,nullptr,0)!=0,"register test draw");
         Require(LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1)!=0,"set obstruction");
         auto event=reinterpret_cast<void(__stdcall*)(int)>(LC_GetRenderEvent());
         event(LC_QueueCamera(h.params.inverseViewProjection));
@@ -364,7 +481,7 @@ int main(int argc,char** argv) {
         h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
         h.Verify(before,h.Draw(h.original.Get()),false);
         uint32_t branches[2]={2,2};
-        LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),branches,2,2.3f)!=0,"register branch mask");
+        LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),branches,2,2.3f,nullptr,0)!=0,"register branch mask");
         Require(LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1)!=0,"bind branch test wall");
         h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
         h.Verify(before,h.Draw(h.original.Get()),true,[](float x,float y,float z){
@@ -372,7 +489,7 @@ int main(int argc,char** argv) {
         });
         LC_Unregister(h.index.Get());
         uint32_t upperTrunk[2]={3,3};
-        Require(LC_Register(h.index.Get(),upperTrunk,2,0)!=0,"register upper trunk mask");
+        Require(LC_Register(h.index.Get(),upperTrunk,2,0,nullptr,0)!=0,"register upper trunk mask");
         geometry=LC_CreateGeometry(nullptr,0,surface,2);Require(geometry!=0,"build upper trunk wall");
         Require(LC_BindGeometry(h.index.Get(),h.params.tree,geometry)!=0,"bind upper trunk wall");LC_ReleaseGeometry(geometry);
         h.SetFrame(1,0);event(0);before=h.Draw(h.original.Get());event(LC_QueueCamera(h.params.inverseViewProjection));
@@ -388,7 +505,7 @@ int main(int argc,char** argv) {
         Require(LC_CreateGeometry(nullptr,131073,nullptr,0)==0,"geometry budget ignored");
         std::cout<<"257-box BVH and exact sloped mesh surface: 24 animated GPU frames passed; shared resource lifetime and all three SRV slots restored\n";
         // Primitive IDs restart per draw; StartIndexLocation must offset the mask.
-        uint32_t mixed[2]={1,0};LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),mixed,2,0)!=0,"register mixed mask");
+        uint32_t mixed[2]={1,0};LC_Unregister(h.index.Get());Require(LC_Register(h.index.Get(),mixed,2,0,nullptr,0)!=0,"register mixed mask");
         LC_SetObstructions(h.index.Get(),h.params.tree,&h.params.inverseBoxes[0][0],1);
         event(0);auto second=h.Draw(h.original.Get(),3,3);event(LC_QueueCamera(h.params.inverseViewProjection));h.Verify(second,h.Draw(h.original.Get(),3,3),false);
         event(0);h.Verify(before,h.Draw(h.original.Get()),false);

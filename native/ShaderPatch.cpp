@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <limits>
 
@@ -99,7 +101,7 @@ cbuffer LeafClip : register(b13) {
     float4 viewport;
     float4 tree;
     uint boxCount; uint triangleBase; uint enabled; uint reserved;
-    float4 inverseBoxes[192];
+    float4 inverseBoxes[255];
 };
 Buffer<uint> eligible : register(t127);
 Buffer<uint4> nodes : register(t126);
@@ -130,11 +132,29 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
     bool spanRejected=false;
     bool spanBoundsConflict=false;
     float spanOverrun=1e20;
-    uint selection=eligible[triangleBase+primitive];
+    uint packedSelection=eligible[triangleBase+primitive];
+    uint selection=packedSelection&3u;
+    uint branchId=(packedSelection>>2)&1023u;
+    uint guideId=(packedSelection>>12)&255u;
     bool branchPixel=selection==2 && length(p.xz-tree.xz)>=tree.w;
     if(enabled!=0 && (selection==1 || branchPixel || selection==3)) {
         if(reserved!=0) {
-            float3 direction=p-start;
+            bool guided=(selection==1 || selection==2) && guideId>0 && guideId<255;
+            uint support=guideId;
+            [loop] for(uint segment=0;segment<(guided?12u:1u) && !hide;++segment) {
+            float3 start=float3(tree.x,p.y,tree.z);
+            float3 end=p;
+            uint nextSupport=0;
+            if(guided) {
+                float3 anchor=inverseBoxes[support].xyz;
+                if(segment==0) {start=anchor;end=p;}
+                else {
+                    nextSupport=(uint)inverseBoxes[support].w;
+                    start=nextSupport>0 && nextSupport<255?inverseBoxes[nextSupport].xyz:float3(tree.x,anchor.y,tree.z);
+                    end=anchor;
+                }
+            }
+            float3 direction=end-start;
             uint node=0;
             [loop] while(node<boxCount && !hide) {
                 uint4 packedLow=nodes[node*2],packedHigh=nodes[node*2+1];
@@ -201,6 +221,11 @@ void main(float4 screen:SV_Position,uint primitive:SV_PrimitiveID) {
                     }
                 }
             }
+            if(guided && segment>0) {
+                if(nextSupport==0 || nextSupport>=255) break;
+                support=nextSupport;
+            }
+            }
         } else if(selection!=3) [loop] for(uint i=0;i<min(boxCount,64u);++i) {
             float3 a=float3(dot(inverseBoxes[i*3],float4(start,1)),dot(inverseBoxes[i*3+1],float4(start,1)),dot(inverseBoxes[i*3+2],float4(start,1)));
             float3 d=float3(dot(inverseBoxes[i*3],float4(p-start,0)),dot(inverseBoxes[i*3+1],float4(p-start,0)),dot(inverseBoxes[i*3+2],float4(p-start,0)));
@@ -222,7 +247,7 @@ ComPtr<ID3DBlob> Compile(const std::string& source,const char* profile) {
     if(FAILED(hr)) throw std::runtime_error(error?std::string((char*)error->GetBufferPointer(),error->GetBufferSize()):"D3DCompile failed");
     return code;
 }
-std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnimatedWorldPosition,bool visualDiagnostic) {
+std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnimatedWorldPosition,int visualDiagnostic) {
     auto chunks=Read(data,size);
     auto original=Instructions(Program(chunks).words);
     bool emissionDiagnostic=false;
@@ -296,7 +321,7 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
     static const auto world40=Compile(worldSource,"ps_4_0");
     static const auto world41=Compile(worldSource,"ps_4_1");
     static const auto world50=Compile(worldSource,"ps_5_0");
-    auto diagnosticSource=[](std::string source,bool emission) {
+    auto diagnosticSource=[](std::string source,bool emission,int mode) {
         auto replace=[&](const char* before,const char* after) {
             size_t at=source.find(before);
             Require(at!=std::string::npos,"diagnostic helper source changed");
@@ -309,7 +334,7 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
             replace("void main(","float4 main(");
             replace("uint primitive:SV_PrimitiveID) {","uint primitive:SV_PrimitiveID) : SV_Target0 {");
         }
-        const char* colors=
+        const char* clipColors=
             "    float4 result=float4(0.05,0.2,1,1);\n"
             "    result=wallHit?float4(0,1,1,1):result;\n"
             "    float4 spanColor=spanOverrun<0.15?float4(1,0.9,0,1):\n"
@@ -318,6 +343,18 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
             "    result=spanRejected?spanColor:result;\n"
             "    result=hide?float4(1,0.05,0.05,1):result;\n"
             "    result=(selection==0 || (selection==2 && !branchPixel))?float4(0.7,0,0.8,1):result;\n";
+        const char* branchColors=
+            "    float4 result=float4(0.08,0.08,0.08,1);\n"
+            "    if(selection==3) result=float4(1,0,0.8,1);\n"
+            "    if(selection==1 || selection==2) {\n"
+            "        float3 phase=float(branchId)*2.3999632+float3(0,2.0943951,4.1887902);\n"
+            "        float3 rgb=0.3+0.7*(0.5+0.5*cos(phase));\n"
+            "        result=branchId==0?float4(1,1,1,1):float4(rgb,1);\n"
+            "        if(selection==2) result.rgb*=0.7;\n"
+            "    }\n";
+        if(mode==2) replace("if(enabled!=0 && (selection==1 || branchPixel || selection==3))",
+            "if(false && (selection==1 || branchPixel || selection==3))");
+        const char* colors=mode==2?branchColors:clipColors;
         if(emission) replace("    clip(hide?-1:1);",
             (std::string(colors)+
              "    DebugOutput output;\n"
@@ -330,31 +367,21 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
     };
     ComPtr<ID3DBlob> helper;
     if(visualDiagnostic) {
-        if(emissionDiagnostic) {
-            static const auto emissionScreen=diagnosticSource(Helper,true);
-            static const auto emissionWorld=diagnosticSource(worldSource,true);
-            static const auto screen40=Compile(emissionScreen,"ps_4_0");
-            static const auto screen41=Compile(emissionScreen,"ps_4_1");
-            static const auto screen50=Compile(emissionScreen,"ps_5_0");
-            static const auto world40=Compile(emissionWorld,"ps_4_0");
-            static const auto world41=Compile(emissionWorld,"ps_4_1");
-            static const auto world50=Compile(emissionWorld,"ps_5_0");
-            helper=useAnimatedWorldPosition
-                ?(version==0x40?world40:version==0x41?world41:world50)
-                :(version==0x40?screen40:version==0x41?screen41:screen50);
-        } else {
-            static const auto diagnosticScreen=diagnosticSource(Helper,false);
-            static const auto diagnosticWorld=diagnosticSource(worldSource,false);
-            static const auto screen40=Compile(diagnosticScreen,"ps_4_0");
-            static const auto screen41=Compile(diagnosticScreen,"ps_4_1");
-            static const auto screen50=Compile(diagnosticScreen,"ps_5_0");
-            static const auto world40=Compile(diagnosticWorld,"ps_4_0");
-            static const auto world41=Compile(diagnosticWorld,"ps_4_1");
-            static const auto world50=Compile(diagnosticWorld,"ps_5_0");
-            helper=useAnimatedWorldPosition
-                ?(version==0x40?world40:version==0x41?world41:world50)
-                :(version==0x40?screen40:version==0x41?screen41:screen50);
+        // PSOs share a small number of helper variants. Compile each once,
+        // even when the D3D12 worker prepares many tree pipelines.
+        static std::mutex cacheMutex;
+        static std::map<unsigned,ComPtr<ID3DBlob>> cache;
+        unsigned key=(unsigned(visualDiagnostic)<<16) | (unsigned(emissionDiagnostic)<<12) |
+            (unsigned(useAnimatedWorldPosition)<<8) | version;
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto found=cache.find(key);
+        if(found==cache.end()) {
+            std::string source=diagnosticSource(useAnimatedWorldPosition?worldSource:Helper,
+                emissionDiagnostic,visualDiagnostic);
+            const char* profile=version==0x40?"ps_4_0":version==0x41?"ps_4_1":"ps_5_0";
+            found=cache.emplace(key,Compile(source,profile)).first;
         }
+        helper=found->second;
     } else helper=useAnimatedWorldPosition
         ?(version==0x40?world40:version==0x41?world41:world50)
         :(version==0x40?helper40:version==0x41?helper41:helper50);
@@ -379,7 +406,11 @@ std::vector<uint8_t> PatchPixelShader(const void* data,size_t size,bool useAnima
         Require(helperRegister<inputs.size(),"helper input register out of range");
         for(unsigned j=0;j<signature[0];++j) {
             size_t o=2+j*6;
-            if(helperSignature[h+1]!=signature[o+1] || name(helperSignature,h)!=name(signature,o))continue;
+            // HLSL semantic names are case-insensitive. Unity's compiled
+            // vegetation shaders use SV_POSITION/TEXCOORD while D3DCompile
+            // can emit mixed-case names for the helper.
+            if(helperSignature[h+1]!=signature[o+1] ||
+                _stricmp(name(helperSignature,h).c_str(),name(signature,o).c_str())!=0)continue;
             unsigned originalRegister=signature[o+4];
             Require(originalRegister<requiredMasks.size(),"original input register out of range");
             Require(((signature[o+5]&0xffu)&(helperSignature[h+5]&0xffu))==(helperSignature[h+5]&0xffu),

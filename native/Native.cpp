@@ -201,7 +201,7 @@ SetTopology12 originalSetTopology12=nullptr;
 Execute12 originalExecute12=nullptr;
 std::atomic<bool> probing12{false};
 std::atomic<bool> clipping12{false};
-bool visualDiagnostic12=false; // selected once, before D3D12 initialization
+int visualDiagnostic12=0; // selected once, before D3D12 initialization
 std::atomic<uint64_t> stats12[29]{}; // first 14 counters retain their ABI positions; later counters diagnose unmodified private draws
 using CreatePS=HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11PixelShader**);
 using DrawIndexed=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
@@ -223,7 +223,7 @@ std::mutex mutex;
 std::condition_variable wake;
 std::thread worker;
 std::deque<std::string> messages;
-struct Shader { std::vector<uint8_t> code; ComPtr<ID3D11PixelShader> patched; bool queued=false,done=false; };
+struct Shader { std::vector<uint8_t> code; ComPtr<ID3D11PixelShader> patched; bool queued=false,done=false,animatedWorldPosition=false; };
 struct Geometry { ComPtr<ID3D11ShaderResourceView> nodes,primitives; unsigned count=0; };
 struct Target { ComPtr<ID3D11Buffer> index; ComPtr<ID3D11ShaderResourceView> mask; std::shared_ptr<Geometry> geometry; ClipConstants data{}; unsigned triangleCount=0; };
 std::unordered_map<uint64_t,std::shared_ptr<Geometry>> geometries;
@@ -236,6 +236,8 @@ uint64_t serial=0;
 size_t capturedBytes=0;
 int cameraSerial=100;
 std::atomic<uint64_t> stats[8]{}; // captured, built, rejected, matched, clipped, missing, unsupported draw, worker failures
+std::atomic<int> cameraWidth11{0},cameraHeight11{0};
+std::atomic<uint64_t> outsideScope11{0},outsideClipped11{0};
 const GUID shaderId={0x7132b186,0x52ef,0x4d26,{0xaf,0x25,0x1e,0x5a,0x99,0x20,0x54,0x31}};
 void Log(const std::string& message) { std::lock_guard<std::mutex> lock(mutex); if(messages.size()<100) messages.push_back(message); }
 void Check(HRESULT hr,const char* what) { if(FAILED(hr)) throw std::runtime_error(std::string(what)+" HRESULT="+std::to_string(uint32_t(hr))); }
@@ -386,11 +388,11 @@ void PreparePipelines12() {
         ComPtr<ID3D12PipelineState> clipped;
         std::string error;
         bool animatedWorldPosition=false;
-        bool visualDiagnostic=false;
+        int visualDiagnostic=0;
         try {
             auto pixel=job->copy->PixelShader();
             auto original=job->copy->Describe(job->root->original.Get());
-            visualDiagnostic=visualDiagnostic12 && original.NumRenderTargets!=0;
+            visualDiagnostic=original.NumRenderTargets!=0?visualDiagnostic12:0;
             static std::atomic<unsigned> inspected{0};
             if(inspected.fetch_add(1)<4) {
                 LogShaderInterface12("VS",original.VS);
@@ -762,14 +764,24 @@ void Work() {
             job=jobs.front(); jobs.pop_front();
         }
         ComPtr<ID3D11PixelShader> result;
+        bool animatedWorldPosition=false;
         try {
-            auto bytes=PatchPixelShader(job->code.data(),job->code.size());
-            Check(originalCreate(device.Get(),bytes.data(),bytes.size(),nullptr,&result),"create patched pixel shader");
-            ++stats[1]; Log("Prepared a post-wind pixel shader variant.");
+            try {
+                auto bytes=PatchPixelShader(job->code.data(),job->code.size(),true);
+                Check(originalCreate(device.Get(),bytes.data(),bytes.size(),nullptr,&result),"create animated-position pixel shader");
+                animatedWorldPosition=true;
+            } catch(const std::exception& ex) {
+                Log(std::string("D3D11 animated-position varying unavailable: ")+ex.what());
+                auto bytes=PatchPixelShader(job->code.data(),job->code.size(),false);
+                Check(originalCreate(device.Get(),bytes.data(),bytes.size(),nullptr,&result),"create patched pixel shader");
+            }
+            ++stats[1]; Log(animatedWorldPosition?
+                "Prepared a post-wind pixel shader variant with animated world position.":
+                "Prepared a post-wind pixel shader variant with reconstructed world position.");
         } catch(const std::exception& ex) {++stats[2]; Log(std::string("Original shader retained: ")+ex.what());}
         {
             std::lock_guard<std::mutex> lock(mutex);
-            job->patched=std::move(result); job->done=true;
+            job->patched=std::move(result); job->animatedWorldPosition=animatedWorldPosition; job->done=true;
         }
     }
 }
@@ -788,7 +800,19 @@ struct DrawScope {
         ID3D11ShaderResourceView* views[]={srv[0].Get(),srv[1].Get(),srv[2].Get()}; context->PSSetShaderResources(125,3,views);
     }
     void Apply(UINT indexCount,UINT firstIndex,UINT instances) {
-        if(!running || !scope || context!=immediate.Get()) return;
+        if(!running || context!=immediate.Get()) return;
+        const bool inScope=scope;
+        D3D11_VIEWPORT viewport{};
+        if(!inScope) {
+            // Unity can issue a main-camera pass between our command-buffer
+            // events. Keep its tree draws consistent with the scoped passes,
+            // but reject smaller or differently shaped shadow/reflection maps.
+            UINT viewportCount=1;context->RSGetViewports(&viewportCount,&viewport);
+            const int width=cameraWidth11.load(),height=cameraHeight11.load();
+            if(viewportCount!=1 || width<=0 || height<=0 || viewport.Height<=0 ||
+                viewport.Width<width*0.75f || viewport.Height<height*0.75f ||
+                std::abs(viewport.Width/viewport.Height-float(width)/height)>0.015f)return;
+        }
         ComPtr<ID3D11Buffer> index; DXGI_FORMAT format; UINT offset=0;
         context->IAGetIndexBuffer(&index,&format,&offset);
         std::shared_ptr<Target> target;
@@ -798,6 +822,12 @@ struct DrawScope {
             std::lock_guard<std::mutex> lock(mutex);
             auto found=targets.find(index.Get()); if(found==targets.end()) return;
             target=found->second; data=target->data; geometry=target->geometry;
+        }
+        if(!inScope) {
+            uint64_t count=++outsideScope11;
+            if(count<=4)Log("D3D11 private draw outside camera scope: viewport="+
+                std::to_string(viewport.Width)+"x"+std::to_string(viewport.Height)+
+                ", indices="+std::to_string(indexCount));
         }
         ++stats[3];
         D3D11_PRIMITIVE_TOPOLOGY topology;
@@ -819,12 +849,14 @@ struct DrawScope {
             auto found=shaders.find(id); if(found==shaders.end()) {++stats[5]; return;}
             auto record=found->second;
             if(!record->queued) {record->queued=true; jobs.push_back(record); wake.notify_one();}
+            // An out-of-scope draw has no reliable inverse camera matrix.
+            if(!inScope && !record->animatedWorldPosition)return;
             patched=record->patched;
         }
         if(!patched) return;
-        UINT count=1; D3D11_VIEWPORT viewport{}; context->RSGetViewports(&count,&viewport);
+        UINT count=1; context->RSGetViewports(&count,&viewport);
         if(count!=1 || viewport.Width<=0 || viewport.Height<=0 || viewport.MinDepth!=0 || viewport.MaxDepth!=1) {++stats[6]; return;}
-        memcpy(data.inverseViewProjection,activeInverse.data(),64);
+        if(inScope)memcpy(data.inverseViewProjection,activeInverse.data(),64);
         data.viewport[0]=viewport.TopLeftX; data.viewport[1]=viewport.TopLeftY;
         data.viewport[2]=viewport.Width; data.viewport[3]=viewport.Height;
         data.triangleBase=firstIndex/3; data.enabled=1;
@@ -836,6 +868,7 @@ struct DrawScope {
         ID3D11ShaderResourceView* resources[]={geometry?geometry->primitives.Get():nullptr,geometry?geometry->nodes.Get():nullptr,target->mask.Get()};
         context->PSSetShaderResources(125,3,resources);
         context->PSSetShader(patched.Get(),nullptr,0); ++stats[4];
+        if(!inScope)++outsideClipped11;
     }
 };
 template<unsigned Slot> void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT count,UINT start,INT base) {
@@ -888,10 +921,10 @@ void __stdcall RenderEvent(int id) {
     }
 }
 }
-int LC_GetApiVersion() {return 9;}
+int LC_GetApiVersion() {return 13;}
 int LC_SetVisualDiagnostic12(int enabled) {
-    if(probing12 || device12 || device)return 0;
-    visualDiagnostic12=enabled!=0;
+    if(probing12 || device12 || device || enabled<0 || enabled>2)return 0;
+    visualDiagnostic12=enabled;
     return 1;
 }
 int LC_Enable12(int enabled) {
@@ -901,7 +934,11 @@ int LC_Enable12(int enabled) {
     return 1;
 }
 int LC_SetFallbackCamera12(const float* backbuffer,const float* texture,int width,int height) {
-    if(!probing12 || !backbuffer || !texture || width<=0 || height<=0)return 0;
+    if((!probing12 && !running) || !backbuffer || !texture || width<=0 || height<=0)return 0;
+    if(running) {
+        cameraWidth11=width;cameraHeight11=height;
+        return 1;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex);
         memcpy(fallbackColorInverse12.data(),backbuffer,64);
@@ -988,9 +1025,12 @@ int LC_Initialize(void* resource) {
         return 1;
     } catch(const std::exception& ex) {Log(ex.what());return 0;}
 }
-int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount,float branchRadius) {
+int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount,float branchRadius,
+    const float* guides,int guideCount) {
     try {
         if(!std::isfinite(branchRadius) || branchRadius<0 || branchRadius>100)return 0;
+        if(guideCount<0 || guideCount>255 || (guideCount && !guides))return 0;
+        for(int i=0;i<guideCount*4;++i)if(!std::isfinite(guides[i]))return 0;
         if(device12 && probing12) {
             if(!buffer || !eligible || triangleCount<=0 || triangleCount>1000000)return 0;
             auto target=std::make_shared<Target12>();
@@ -1002,6 +1042,7 @@ int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount,float br
             target->mask=MakeTypedBuffer12(device12.Get(),eligible,size_t(triangleCount)*4,DXGI_FORMAT_R32_UINT,triangleCount);
             target->triangleCount=triangleCount;
             target->data.tree[3]=branchRadius;
+            if(guideCount)memcpy(target->data.inverseBoxes,guides,size_t(guideCount)*4*sizeof(float));
             std::lock_guard<std::mutex> lock(mutex12);
             if(targets12.count(target->index.Get()) || targetAddresses12.count(target->address))
                 throw std::runtime_error("D3D12 private mesh index resource is not unique");
@@ -1012,6 +1053,7 @@ int LC_Register(void* buffer,const uint32_t* eligible,int triangleCount,float br
         if(!running || !buffer || !eligible || triangleCount<=0 || triangleCount>1000000) return 0;
         auto target=std::make_shared<Target>(); target->index=static_cast<ID3D11Buffer*>(buffer); target->triangleCount=triangleCount;
         target->data.tree[3]=branchRadius;
+        if(guideCount)memcpy(target->data.inverseBoxes,guides,size_t(guideCount)*4*sizeof(float));
         D3D11_BUFFER_DESC desc{};desc.ByteWidth=triangleCount*4;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;desc.Usage=D3D11_USAGE_IMMUTABLE;
         D3D11_SUBRESOURCE_DATA initial{};initial.pSysMem=eligible;
         ComPtr<ID3D11Buffer> mask;
@@ -1034,7 +1076,7 @@ void LC_Unregister(void* buffer) {
     std::lock_guard<std::mutex> lock(mutex);targets.erase(static_cast<ID3D11Buffer*>(buffer));
 }
 int LC_SetObstructions(void* buffer,const float* tree,const float* boxes,int count) {
-    if(!tree || count<0 || count>int(MaxBoxes) || (count && !boxes)) return 0;
+    if(!tree || count<0 || count>64 || (count && !boxes)) return 0;
     std::lock_guard<std::mutex> lock(mutex);
     auto found=targets.find(static_cast<ID3D11Buffer*>(buffer));if(found==targets.end())return 0;
     auto& data=found->second->data;memcpy(data.tree,tree,12);data.boxCount=count;data.reserved=0;found->second->geometry.reset();
@@ -1100,7 +1142,12 @@ int LC_PollLog(char* output,int capacity) {
     std::lock_guard<std::mutex> lock(mutex);if(messages.empty()){output[0]=0;return 0;}
     auto message=messages.front();messages.pop_front();size_t n=std::min(message.size(),size_t(capacity-1));memcpy(output,message.data(),n);output[n]=0;return int(n);
 }
-void LC_GetStats(uint64_t* values,int count) {if(values)for(int i=0;i<std::min(count,8);++i)values[i]=stats[i].load();}
+void LC_GetStats(uint64_t* values,int count) {
+    if(!values)return;
+    for(int i=0;i<std::min(count,8);++i)values[i]=stats[i].load();
+    if(count>8)values[8]=outsideScope11.load();
+    if(count>9)values[9]=outsideClipped11.load();
+}
 void LC_Shutdown() {
     running=false;probing12=false;clipping12=false;wake.notify_all();if(worker.joinable())worker.join();
     runningWorker12=false;wake12.notify_all();if(worker12.joinable())worker12.join();
